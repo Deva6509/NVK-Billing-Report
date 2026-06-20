@@ -337,16 +337,35 @@ function Step1({ onDone }: { onDone: (batchId: string) => void }) {
 
       if (allRows.length === 0) throw new Error("No data rows found in the uploaded files");
 
-      // Send parsed JSON rows to the server (much smaller than raw files)
-      const res = await fetch("/api/upload/consolidate", {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({ rows: allRows, fileCount: files.length }),
-      });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({ message: "Server error" }));
-        throw new Error(err.message ?? "Server error");
+      // Send in 3000-row chunks to stay within Vercel's 4.5MB body limit
+      const CHUNK = 3000;
+      const chunks: Record<string, any>[][] = [];
+      for (let i = 0; i < allRows.length; i += CHUNK) chunks.push(allRows.slice(i, i + CHUNK));
+
+      let batchId = "";
+      let finalRes: Response | null = null;
+
+      for (let i = 0; i < chunks.length; i++) {
+        const isFinal = i === chunks.length - 1;
+        const res = await fetch("/api/upload/consolidate", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({
+            rows:      chunks[i],
+            fileCount: i === 0 ? files.length : 0,
+            batchId:   batchId || undefined,
+            isFinal,
+          }),
+        });
+        if (!res.ok) {
+          const err = await res.json().catch(() => ({ message: "Server error" }));
+          throw new Error(err.message ?? "Server error");
+        }
+        if (isFinal) { finalRes = res; }
+        else         { const d = await res.json(); batchId = d.batchId; }
       }
+
+      const res      = finalRes!;
       const rows      = Number(res.headers.get("X-Row-Count") ?? 0);
       const matched   = Number(res.headers.get("X-Matched-Count") ?? 0);
       const unmatched = Number(res.headers.get("X-Unmatched-Count") ?? 0);

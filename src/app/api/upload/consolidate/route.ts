@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import * as XLSX from "xlsx";
 import { prisma } from "@/lib/prisma";
 
-// Entry By formula: ASA if SubHead=Adjustments AND item contains "ASA "/"ASA_"/"ASA-", else CENTER
+export const maxDuration = 60;
+
 function computeEntryBy(itemText: string | null, subHead: string | null): string {
   if (subHead === "Adjustments" && itemText) {
     const t = itemText.toUpperCase();
@@ -11,92 +12,107 @@ function computeEntryBy(itemText: string | null, subHead: string | null): string
   return "CENTER";
 }
 
-// Find the first matching ItemMaster entry for a given item text.
-// Logic mirrors the Excel SEARCH formula: master.item must be a substring of txnItem.
 function matchItem(txnItem: string, masters: { id: number; item: string; majorHead: string; subHead: string }[]) {
   if (!txnItem) return null;
   const lower = txnItem.toLowerCase();
-  // Sort longer patterns first so more-specific entries win over shorter ones
   const sorted = [...masters].sort((a, b) => b.item.length - a.item.length);
   return sorted.find((m) => lower.includes(m.item.toLowerCase())) ?? null;
 }
 
-export const maxDuration = 60;
-
+// POST /api/upload/consolidate
+// Body: { rows, fileCount, batchId?, isFinal }
+// - First chunk (no batchId): creates batch, inserts rows, returns { batchId }
+// - Middle chunks (batchId, isFinal=false): appends rows, returns { batchId }
+// - Last chunk (batchId, isFinal=true): appends rows, generates Excel, returns file
 export async function POST(req: NextRequest) {
   try {
-    // Accept pre-parsed JSON rows from client (avoids Vercel's 4.5MB file upload limit)
     const body = await req.json();
-    const allRows: Record<string, any>[] = body.rows ?? [];
-    const fileCount: number = body.fileCount ?? 0;
+    const incomingRows: Record<string, any>[] = body.rows ?? [];
+    const fileCount: number  = body.fileCount ?? 0;
+    const existingBatchId: string | undefined = body.batchId;
+    const isFinal: boolean   = body.isFinal ?? true;
 
-    if (!allRows.length) {
+    if (!incomingRows.length) {
       return NextResponse.json({ success: false, message: "No data rows provided" }, { status: 400 });
     }
 
-    // Load item master from DB
+    // Load item master once
     let masters: { id: number; item: string; majorHead: string; subHead: string }[] = [];
     try {
       masters = await (prisma as any).itemMaster.findMany({ where: { isActive: true } });
-    } catch { /* item master table may not exist yet */ }
+    } catch { /* table may not exist */ }
 
-    const headerKeys = Object.keys(allRows[0] ?? {});
-
-    // Detect which column holds the item text (case-insensitive match for "item")
+    const headerKeys = Object.keys(incomingRows[0] ?? {});
     const itemCol = headerKeys.find((k) => k.trim().toLowerCase() === "item") ?? null;
 
-    // Apply item master matching and build output rows
-    const outputRows: Record<string, any>[] = [];
-    const dbRows: { rawData: any; itemText: string | null; majorHead: string | null; subHead: string | null; entryBy: string | null; isMatched: boolean }[] = [];
-
-    for (const row of allRows) {
+    // Apply item matching to this chunk's rows
+    const dbRows = incomingRows.map((row) => {
       const txnItem = itemCol ? String(row[itemCol] ?? "").trim() : "";
-      const match = txnItem ? matchItem(txnItem, masters) : null;
-
-      const majorHead = match?.majorHead ?? null;
-      const subHead   = match?.subHead   ?? null;
-      const entryBy   = match ? "System" : null;
-
-      // Build master-column-ordered output row + 3 new columns at end
-      const out: Record<string, any> = {};
-      for (const k of headerKeys) out[k] = row[k] ?? null;
-      out["Major Head"] = majorHead ?? "";
-      out["Sub Head"]   = subHead   ?? "";
-      out["Entry By"]   = computeEntryBy(txnItem, subHead);
-      out["Matched By"] = entryBy   ?? "";
-
-      outputRows.push(out);
-      dbRows.push({
+      const match   = txnItem ? matchItem(txnItem, masters) : null;
+      return {
         rawData:   row,
         itemText:  txnItem || null,
-        majorHead,
-        subHead,
-        entryBy,
+        majorHead: match?.majorHead ?? null,
+        subHead:   match?.subHead   ?? null,
+        entryBy:   match ? "System" : null,
         isMatched: !!match,
-      });
-    }
+      };
+    });
 
-    // Save batch + rows to DB (graceful — skip if Prisma client not yet regenerated)
-    const matchedCount   = dbRows.filter((r) => r.isMatched).length;
-    const unmatchedCount = dbRows.length - matchedCount;
+    let batchId: string;
 
-    let batchId = "";
-    try {
+    if (!existingBatchId) {
+      // First chunk — create batch with rows
       const batch = await (prisma as any).fin14Batch.create({
         data: {
-          fileCount:      fileCount,
-          rowCount:       dbRows.length,
-          matchedCount,
-          unmatchedCount,
+          fileCount,
+          rowCount:       0,
+          matchedCount:   0,
+          unmatchedCount: 0,
           rows: { create: dbRows },
         },
       });
       batchId = batch.id;
-    } catch {
-      // Will work after Prisma client regeneration + dev server restart
+    } else {
+      // Subsequent chunk — append rows to existing batch
+      batchId = existingBatchId;
+      await (prisma as any).fin14Row.createMany({
+        data: dbRows.map((r) => ({ ...r, batchId })),
+      });
     }
 
-    // Build Excel
+    // Return early if more chunks are coming
+    if (!isFinal) {
+      return NextResponse.json({ batchId });
+    }
+
+    // Final chunk — fetch ALL rows for this batch, update stats, build Excel
+    const allRows = await (prisma as any).fin14Row.findMany({
+      where:   { batchId },
+      orderBy: { id: "asc" },
+    });
+
+    const matchedCount   = allRows.filter((r: any) => r.isMatched).length;
+    const unmatchedCount = allRows.length - matchedCount;
+
+    await (prisma as any).fin14Batch.update({
+      where: { id: batchId },
+      data:  { rowCount: allRows.length, matchedCount, unmatchedCount },
+    });
+
+    // Build Excel output
+    const allHeaderKeys: string[] = allRows[0]?.rawData ? Object.keys(allRows[0].rawData) : [];
+    const outputRows = allRows.map((row: any) => {
+      const txnItem = itemCol ? String(row.rawData?.[itemCol] ?? "").trim() : "";
+      const out: Record<string, any> = {};
+      for (const k of allHeaderKeys) out[k] = row.rawData[k] ?? null;
+      out["Major Head"] = row.majorHead ?? "";
+      out["Sub Head"]   = row.subHead   ?? "";
+      out["Entry By"]   = computeEntryBy(txnItem, row.subHead);
+      out["Matched By"] = row.entryBy   ?? "";
+      return out;
+    });
+
     const ws = XLSX.utils.json_to_sheet(outputRows);
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "Consolidated");
@@ -104,13 +120,13 @@ export async function POST(req: NextRequest) {
 
     return new NextResponse(buf, {
       headers: {
-        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Type":        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "Content-Disposition": `attachment; filename="FIN14_Consolidated.xlsx"`,
-        "X-Row-Count":       String(allRows.length),
-        "X-File-Count":      String(files.length),
-        "X-Matched-Count":   String(matchedCount),
-        "X-Unmatched-Count": String(unmatchedCount),
-        "X-Batch-Id":        batchId,
+        "X-Row-Count":         String(allRows.length),
+        "X-File-Count":        String(fileCount),
+        "X-Matched-Count":     String(matchedCount),
+        "X-Unmatched-Count":   String(unmatchedCount),
+        "X-Batch-Id":          batchId,
       },
     });
   } catch (err: any) {
