@@ -21,50 +21,26 @@ function matchItem(txnItem: string, masters: { id: number; item: string; majorHe
   return sorted.find((m) => lower.includes(m.item.toLowerCase())) ?? null;
 }
 
+export const maxDuration = 60;
+
 export async function POST(req: NextRequest) {
   try {
-    const formData = await req.formData();
-    const files = formData.getAll("files") as File[];
+    // Accept pre-parsed JSON rows from client (avoids Vercel's 4.5MB file upload limit)
+    const body = await req.json();
+    const allRows: Record<string, any>[] = body.rows ?? [];
+    const fileCount: number = body.fileCount ?? 0;
 
-    if (!files.length) {
-      return NextResponse.json({ success: false, message: "No files provided" }, { status: 400 });
+    if (!allRows.length) {
+      return NextResponse.json({ success: false, message: "No data rows provided" }, { status: 400 });
     }
 
-    // Load item master from DB (graceful — may be unavailable if Prisma client not yet regenerated)
+    // Load item master from DB
     let masters: { id: number; item: string; majorHead: string; subHead: string }[] = [];
     try {
       masters = await (prisma as any).itemMaster.findMany({ where: { isActive: true } });
-    } catch {
-      // Prisma client needs regeneration — run `node node_modules/prisma/build/index.js generate` then restart dev server
-    }
+    } catch { /* item master table may not exist yet */ }
 
-    let headerKeys: string[] = [];
-    let allRows: Record<string, any>[] = [];
-
-    for (const file of files) {
-      const buffer = Buffer.from(await file.arrayBuffer());
-      const wb = XLSX.read(buffer, { type: "buffer", cellDates: true });
-      const ws = wb.Sheets[wb.SheetNames[0]];
-      const rows = XLSX.utils.sheet_to_json(ws, { defval: null }) as Record<string, any>[];
-
-      if (rows.length === 0) continue;
-
-      if (headerKeys.length === 0) headerKeys = Object.keys(rows[0]);
-
-      for (const row of rows) {
-        const isHeader = headerKeys.some(
-          (k) => row[k] !== null && String(row[k] ?? "").trim() === k.trim()
-        );
-        const isEmpty = headerKeys.every(
-          (k) => row[k] === null || row[k] === undefined || String(row[k]).trim() === ""
-        );
-        if (!isHeader && !isEmpty) allRows.push(row);
-      }
-    }
-
-    if (allRows.length === 0) {
-      return NextResponse.json({ success: false, message: "No data rows found after cleaning" }, { status: 422 });
-    }
+    const headerKeys = Object.keys(allRows[0] ?? {});
 
     // Detect which column holds the item text (case-insensitive match for "item")
     const itemCol = headerKeys.find((k) => k.trim().toLowerCase() === "item") ?? null;
@@ -108,7 +84,7 @@ export async function POST(req: NextRequest) {
     try {
       const batch = await (prisma as any).fin14Batch.create({
         data: {
-          fileCount:      files.length,
+          fileCount:      fileCount,
           rowCount:       dbRows.length,
           matchedCount,
           unmatchedCount,

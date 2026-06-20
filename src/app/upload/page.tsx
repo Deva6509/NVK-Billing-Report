@@ -315,11 +315,34 @@ function Step1({ onDone }: { onDone: (batchId: string) => void }) {
     setState("processing");
     setErrorMsg(null);
 
-    const formData = new FormData();
-    for (const file of files) formData.append("files", file);
-
     try {
-      const res = await fetch("/api/upload/consolidate", { method: "POST", body: formData });
+      // Parse all Excel files in the browser to avoid Vercel's 4.5 MB upload limit
+      const XLSX = await import("xlsx");
+      let headerKeys: string[] = [];
+      const allRows: Record<string, any>[] = [];
+
+      for (const file of files) {
+        const buffer = await file.arrayBuffer();
+        const wb = XLSX.read(buffer, { type: "buffer", cellDates: true });
+        const ws = wb.Sheets[wb.SheetNames[0]];
+        const rows = XLSX.utils.sheet_to_json(ws, { defval: null }) as Record<string, any>[];
+        if (rows.length === 0) continue;
+        if (headerKeys.length === 0) headerKeys = Object.keys(rows[0]);
+        for (const row of rows) {
+          const isHeader = headerKeys.some((k) => row[k] !== null && String(row[k] ?? "").trim() === k.trim());
+          const isEmpty  = headerKeys.every((k) => row[k] === null || String(row[k] ?? "").trim() === "");
+          if (!isHeader && !isEmpty) allRows.push(row);
+        }
+      }
+
+      if (allRows.length === 0) throw new Error("No data rows found in the uploaded files");
+
+      // Send parsed JSON rows to the server (much smaller than raw files)
+      const res = await fetch("/api/upload/consolidate", {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body:    JSON.stringify({ rows: allRows, fileCount: files.length }),
+      });
       if (!res.ok) {
         const err = await res.json().catch(() => ({ message: "Server error" }));
         throw new Error(err.message ?? "Server error");
