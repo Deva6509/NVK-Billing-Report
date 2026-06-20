@@ -1,5 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import * as XLSX from "xlsx";
 import { prisma } from "@/lib/prisma";
 
 export const maxDuration = 60;
@@ -19,18 +18,18 @@ function parseDateFromFilename(filename: string): Date | null {
   return new Date(+m[3], month, +m[1]);
 }
 
-function excelDateToString(val: any): string {
+function toDateStr(val: any): string {
   if (!val && val !== 0) return "";
-  if (val instanceof Date) {
-    const dd = String(val.getDate()).padStart(2, "0");
-    const mm = String(val.getMonth() + 1).padStart(2, "0");
-    return `${dd}/${mm}/${val.getFullYear()}`;
+  // ISO string from client-side serialisation
+  if (typeof val === "string" && val.includes("T")) {
+    const d = new Date(val);
+    if (!isNaN(d.getTime())) {
+      return `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}/${d.getFullYear()}`;
+    }
   }
   if (typeof val === "number") {
     const d = new Date((val - 25569) * 86400000);
-    const dd = String(d.getDate()).padStart(2, "0");
-    const mm = String(d.getMonth() + 1).padStart(2, "0");
-    return `${dd}/${mm}/${d.getFullYear()}`;
+    return `${String(d.getDate()).padStart(2,"0")}/${String(d.getMonth()+1).padStart(2,"0")}/${d.getFullYear()}`;
   }
   return String(val);
 }
@@ -41,41 +40,29 @@ function safeDecimal(val: any): number | null {
   return isNaN(n) ? null : n;
 }
 
-// POST /api/fc28/sync — accepts uploaded FC28 Excel files and inserts new records into DB
+// POST /api/fc28/sync — accepts { filename, rows[] } JSON (rows parsed client-side)
 export async function POST(req: NextRequest) {
   try {
-    const formData = await req.formData();
-    const files = formData.getAll("files") as File[];
+    const body = await req.json() as { filename: string; rows: Record<string, any>[] };
+    const { filename, rows } = body;
 
-    if (!files || files.length === 0) {
-      return NextResponse.json({ error: "No files uploaded" }, { status: 400 });
+    if (!filename || !Array.isArray(rows) || rows.length === 0) {
+      return NextResponse.json({ error: "Missing filename or rows" }, { status: 400 });
     }
 
-    // Find which report dates are already fully synced in the DB
-    const existingDates: { reportDate: Date }[] = await db.fC28Record.findMany({
-      select:   { reportDate: true },
-      distinct: ["reportDate"],
-    });
-    const syncedDates = new Set(existingDates.map((r: any) => r.reportDate.toISOString().slice(0, 10)));
+    const reportDate = parseDateFromFilename(filename);
+    if (!reportDate) {
+      return NextResponse.json({ filesProcessed: 0, filesSkipped: 1, rowsInserted: 0, rowsSkipped: 0, totalInDb: await db.fC28Record.count() });
+    }
 
-    let filesProcessed = 0;
-    let filesSkipped   = 0;
-    let rowsInserted   = 0;
-    let rowsSkipped    = 0;
+    const dateKey = reportDate.toISOString().slice(0, 10);
+    const existing = await db.fC28Record.findFirst({ where: { reportDate } });
+    if (existing) {
+      return NextResponse.json({ filesProcessed: 0, filesSkipped: 1, rowsInserted: 0, rowsSkipped: 0, totalInDb: await db.fC28Record.count() });
+    }
 
-    for (const file of files) {
-      const reportDate = parseDateFromFilename(file.name);
-      if (!reportDate) { filesSkipped++; continue; }
-
-      const dateKey = reportDate.toISOString().slice(0, 10);
-      if (syncedDates.has(dateKey)) { filesSkipped++; continue; }
-
-      const buffer = Buffer.from(await file.arrayBuffer());
-      const wb    = XLSX.read(buffer, { type: "buffer", cellDates: true });
-      const ws    = wb.Sheets[wb.SheetNames[0]];
-      const rows  = XLSX.utils.sheet_to_json(ws, { defval: null }) as Record<string, any>[];
-
-      const records = rows.map((row) => ({
+    const records = rows
+      .map((row) => ({
         reportDate,
         childId:                 String(row["Child ID"] ?? "").trim(),
         childName:               String(row["Child Name"] ?? "").trim() || null,
@@ -87,27 +74,31 @@ export async function POST(req: NextRequest) {
         familyStatus:            String(row["Family Status"] ?? "").trim() || null,
         classroom:               String(row["Classroom"] ?? "").trim() || null,
         rateSheet:               String(row["Rate Sheet"] ?? "").trim() || null,
-        dateOfBirth:             excelDateToString(row["Date of Birth"]) || null,
-        enrollDate:              excelDateToString(row["Enroll Date"]) || null,
-        startDate:               excelDateToString(row["Start Date"]) || null,
+        dateOfBirth:             toDateStr(row["Date of Birth"]) || null,
+        enrollDate:              toDateStr(row["Enroll Date"]) || null,
+        startDate:               toDateStr(row["Start Date"]) || null,
         program:                 String(row["Program"] ?? "").trim() || null,
         billingCycle:            String(row["Billing Cycle"] ?? "").trim() || null,
         agency:                  String(row["Agency"] ?? "").trim() || null,
         estimatedContractAmount: safeDecimal(row["Estimated Contract Amount"]),
         rawData:                 row,
-      })).filter((r) => r.childId);
+      }))
+      .filter((r) => r.childId);
 
-      if (records.length === 0) { filesSkipped++; continue; }
-
-      const result = await db.fC28Record.createMany({ data: records, skipDuplicates: true });
-      rowsInserted += result.count;
-      rowsSkipped  += records.length - result.count;
-      filesProcessed++;
+    if (records.length === 0) {
+      return NextResponse.json({ filesProcessed: 0, filesSkipped: 1, rowsInserted: 0, rowsSkipped: 0, totalInDb: await db.fC28Record.count() });
     }
 
+    const result    = await db.fC28Record.createMany({ data: records, skipDuplicates: true });
     const totalInDb = await db.fC28Record.count();
 
-    return NextResponse.json({ success: true, filesProcessed, filesSkipped, rowsInserted, rowsSkipped, totalInDb });
+    return NextResponse.json({
+      filesProcessed: 1,
+      filesSkipped:   0,
+      rowsInserted:   result.count,
+      rowsSkipped:    records.length - result.count,
+      totalInDb,
+    });
   } catch (err: any) {
     return NextResponse.json({ error: err.message ?? "Sync failed" }, { status: 500 });
   }

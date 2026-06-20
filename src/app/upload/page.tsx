@@ -138,12 +138,46 @@ function FC28HistoryCard() {
     setSyncResult(null);
     setSyncError(null);
     try {
-      const formData = new FormData();
-      for (const file of pendingFiles) formData.append("files", file);
-      const res  = await fetch("/api/fc28/sync", { method: "POST", body: formData });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error ?? `Error ${res.status}`);
-      setSyncResult(data);
+      // Parse all FC28 files client-side to avoid Vercel's 4.5 MB upload limit
+      const XLSX = await import("xlsx");
+
+      let totalFilesProcessed = 0;
+      let totalFilesSkipped   = 0;
+      let totalRowsInserted   = 0;
+      let totalRowsSkipped    = 0;
+      let lastTotalInDb       = 0;
+
+      for (const file of pendingFiles) {
+        const buffer = await file.arrayBuffer();
+        const wb     = XLSX.read(buffer, { type: "buffer", cellDates: true });
+        const ws     = wb.Sheets[wb.SheetNames[0]];
+        const rows   = XLSX.utils.sheet_to_json(ws, { defval: null }) as Record<string, any>[];
+
+        // Serialise Date objects to ISO strings so they survive JSON serialisation
+        const serialised = rows.map((row) => {
+          const out: Record<string, any> = {};
+          for (const [k, v] of Object.entries(row)) {
+            out[k] = v instanceof Date ? v.toISOString() : v;
+          }
+          return out;
+        });
+
+        const res  = await fetch("/api/fc28/sync", {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body:    JSON.stringify({ filename: file.name, rows: serialised }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.error ?? `Error ${res.status}`);
+
+        totalFilesProcessed += data.filesProcessed ?? 0;
+        totalFilesSkipped   += data.filesSkipped   ?? 0;
+        totalRowsInserted   += data.rowsInserted   ?? 0;
+        totalRowsSkipped    += data.rowsSkipped     ?? 0;
+        lastTotalInDb        = data.totalInDb       ?? lastTotalInDb;
+      }
+
+      setSyncResult({ filesProcessed: totalFilesProcessed, filesSkipped: totalFilesSkipped, rowsInserted: totalRowsInserted, rowsSkipped: totalRowsSkipped, totalInDb: lastTotalInDb });
       setPendingFiles([]);
       await loadStats();
     } catch (e: any) {
