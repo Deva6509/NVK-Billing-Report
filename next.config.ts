@@ -7,7 +7,7 @@ const nextConfig: NextConfig = {
   typescript: {
     ignoreBuildErrors: true,
   },
-  serverExternalPackages: ["xlsx", "@prisma/client", "prisma"],
+  serverExternalPackages: ["xlsx", "exceljs", "@prisma/client", "prisma"],
 };
 
 export default nextConfig;
