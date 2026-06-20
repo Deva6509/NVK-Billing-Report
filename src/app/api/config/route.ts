@@ -1,35 +1,15 @@
-import { NextRequest, NextResponse } from "next/server";
-import * as fs from "fs";
-import { readConfig, writeConfig } from "@/lib/app-config";
+import { NextResponse } from "next/server";
 
+// Config route — folder path configuration is no longer used in cloud deployment.
+// FC28 files are uploaded directly via the Upload page.
 export async function GET() {
-  return NextResponse.json(readConfig());
+  return NextResponse.json({ fc28HistoryPath: "" });
 }
 
-export async function PATCH(req: NextRequest) {
-  try {
-    const body = await req.json();
-    const updated = writeConfig(body);
-    return NextResponse.json(updated);
-  } catch (err: any) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
-  }
+export async function PATCH() {
+  return NextResponse.json({ fc28HistoryPath: "" });
 }
 
-// Validate that a folder path exists and contains FC28 files
-export async function POST(req: NextRequest) {
-  try {
-    const { fc28HistoryPath } = await req.json();
-    if (!fc28HistoryPath) return NextResponse.json({ valid: false, error: "Path is required" }, { status: 400 });
-
-    if (!fs.existsSync(fc28HistoryPath)) {
-      return NextResponse.json({ valid: false, error: "Folder not found" });
-    }
-    const files = fs.readdirSync(fc28HistoryPath).filter((f) =>
-      f.toLowerCase().endsWith(".xlsx") || f.toLowerCase().endsWith(".xls")
-    );
-    return NextResponse.json({ valid: true, fileCount: files.length, files: files.slice(0, 5) });
-  } catch (err: any) {
-    return NextResponse.json({ valid: false, error: err.message }, { status: 500 });
-  }
+export async function POST() {
+  return NextResponse.json({ valid: false, error: "Folder paths are not supported in cloud mode. Upload files directly." });
 }

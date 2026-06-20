@@ -1,8 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import * as XLSX from "xlsx";
-import path from "path";
-import fs from "fs";
 
 // "Matched" tolerance and the fractional-difference band (tunable).
 const MATCH_TOLERANCE = 1; // within $1 = Matched
@@ -290,18 +288,21 @@ export async function POST(req: NextRequest) {
       });
       XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(rows), "Unallocated (multi-child)");
     }
-    const outputDir = process.env.UPLOAD_DIR || "C:/Users/Administrator/Downloads/Billing-Report";
     const buf = XLSX.write(wb, { bookType: "xlsx", type: "buffer" }) as Buffer;
-    let outPath = path.join(outputDir, `Calculated_Billing_Report.xlsx`);
-    try { fs.writeFileSync(outPath, buf); }
-    catch {
-      outPath = path.join(outputDir, `Calculated_Billing_Report_${new Date().toISOString().replace(/[:.]/g, "-")}.xlsx`);
-      fs.writeFileSync(outPath, buf);
-    }
+    const filename = `Calculated_Billing_Report_${new Date().toISOString().slice(0, 10)}.xlsx`;
+
+    return new NextResponse(buf, {
+      headers: {
+        "Content-Type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Content-Disposition": `attachment; filename="${filename}"`,
+        "X-Processed": String(processed),
+        "X-Unallocated": String(unallocated.length),
+      },
+    });
 
     return NextResponse.json({
       success: true, processed, unallocatedLines: unallocated.length,
-      message: `Calculated ${processed} child-period facts. Report saved to ${outPath}` +
+      message: `Calculated ${processed} child-period facts.` +
         (unallocated.length ? ` (${unallocated.length} family-level lines need allocation)` : ""),
     });
   } catch (err: any) {
