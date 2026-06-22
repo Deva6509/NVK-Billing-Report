@@ -399,27 +399,16 @@ function ReviewPageContent() {
               <GitMerge className="w-3.5 h-3.5" />Map FC28 to FIN14
             </button>
 
-            {/* Generate Final Report button */}
+            {/* Generate Final Report button — includes Summary + Transactions sheets */}
             <button
               onClick={generateFinalReport}
               disabled={reporting || !data?.total}
-              title="Pivot: Child × Major Head/Sub Head with Amount totals. Excludes rows with blank Family Name."
+              title="Downloads a 2-sheet Excel: Summary (pivot by child) + Transactions (all raw rows)"
               className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-semibold border border-orange-300 text-orange-700 bg-orange-50 hover:bg-orange-100 disabled:opacity-40 transition-colors"
             >
               {reporting
                 ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" />Generating…</>
                 : <><FileBarChart2 className="w-3.5 h-3.5" />Generate Final Report</>}
-            </button>
-
-            {/* Export raw */}
-            <button
-              onClick={exportExcel}
-              disabled={downloading || !data?.total}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-semibold border border-green-300 text-green-700 bg-green-50 hover:bg-green-100 disabled:opacity-40 transition-colors"
-            >
-              {downloading
-                ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" />Exporting…</>
-                : <><Download className="w-3.5 h-3.5" />Export to Excel</>}
             </button>
           </div>
 

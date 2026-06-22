@@ -399,12 +399,20 @@ function Step1({ onDone }: { onDone: (batchId: string) => void }) {
         else         { const d = await res.json(); batchId = d.batchId; }
       }
 
-      const res      = finalRes!;
-      const rows      = Number(res.headers.get("X-Row-Count") ?? 0);
-      const matched   = Number(res.headers.get("X-Matched-Count") ?? 0);
-      const unmatched = Number(res.headers.get("X-Unmatched-Count") ?? 0);
-      const bid       = res.headers.get("X-Batch-Id") ?? null;
-      const blob = await res.blob();
+      // Server returns JSON counts — generate Excel locally from allRows already in memory
+      const finalData = await finalRes!.json();
+      const bid       = finalData.batchId ?? null;
+      const rows      = finalData.rowCount ?? allRows.length;
+      const matched   = finalData.matchedCount ?? 0;
+      const unmatched = finalData.unmatchedCount ?? 0;
+
+      // Build consolidated Excel client-side (near-instant — data already in memory)
+      const ws   = XLSX.utils.json_to_sheet(allRows);
+      const wb2  = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb2, ws, "Consolidated");
+      const buf  = XLSX.write(wb2, { type: "array", bookType: "xlsx" });
+      const blob = new Blob([buf], { type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" });
+
       setLastBlob(blob);
       setRowCount(rows);
       setMatchedCount(matched);

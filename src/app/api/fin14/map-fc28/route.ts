@@ -10,7 +10,7 @@ function sse(data: object) {
   return enc.encode(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-const BATCH_SIZE = 500; // children per SQL UPDATE
+const BATCH_SIZE = 1000; // children per SQL UPDATE
 
 // POST /api/fin14/map-fc28  — streams SSE progress events
 export async function POST(req: NextRequest) {

@@ -4,26 +4,20 @@ import ExcelJS from "exceljs";
 
 export const maxDuration = 60;
 
-const db = prisma as any;
-
 // ── Colours ───────────────────────────────────────────────────────────────────
 const C = {
-  navyFg:    "FFFFFFFF",
+  white:     "FFFFFFFF",
   navy:      "FF003887",
   navyLight: "FF1e4da1",
+  navyDark:  "FF0f2a5e",
   teal:      "FF0d9488",
   tealLight: "FFf0fdfa",
   blue50:    "FFdbeafe",
-  blue100:   "FFbfdbfe",
-  slate50:   "FFf8fafc",
-  slate100:  "FFf1f5f9",
-  slate200:  "FFe2e8f0",
-  slate700:  "FF334155",
-  white:     "FFFFFFFF",
-  green:     "FF16a34a",
-  red:       "FFdc2626",
   altRow:    "FFf0f7ff",
-  totals:    "FF0f2a5e",
+  slate100:  "FFf1f5f9",
+  slate700:  "FF334155",
+  red:       "FFdc2626",
+  green:     "FF16a34a",
 };
 
 function fill(argb: string): ExcelJS.Fill {
@@ -37,7 +31,6 @@ function medBorder(): Partial<ExcelJS.Borders> {
   const s = { style: "medium" as ExcelJS.BorderStyle, color: { argb: "FF94a3b8" } };
   return { top: s, left: s, bottom: s, right: s };
 }
-function money(n: number): string { return "#,##0.00"; }
 
 function parseMoney(val: any): number {
   if (val === null || val === undefined || val === "") return 0;
@@ -46,18 +39,6 @@ function parseMoney(val: any): number {
   return isNaN(n) ? 0 : n;
 }
 
-const ROW_FIELDS = [
-  { label: "Child ID",        wch: 11,  key: (r: any) => r.rawData?.["Child ID"]               ?? "" },
-  { label: "Child Name",      wch: 26,  key: (r: any) => r.rawData?.["Child Name"]             ?? "" },
-  { label: "Center",          wch: 24,  key: (r: any) => r.rawData?.["Center"]                 ?? "" },
-  { label: "Billing Cycle",   wch: 14,  key: (r: any) => r.rawData?.["Billing Cycle (FC28)"]   ?? r.rawData?.["Billing Cycle"] ?? "" },
-  { label: "Child Status",    wch: 13,  key: (r: any) => r.rawData?.["Child Status (FC28)"]    ?? "" },
-  { label: "Start Date",      wch: 13,  key: (r: any) => r.rawData?.["Start Date (FC28)"]      ?? "" },
-  { label: "Withdrawal Date", wch: 16,  key: (r: any) => r.rawData?.["Withdrawal Date (FC28)"] ?? "" },
-  { label: "Classroom",       wch: 16,  key: (r: any) => r.rawData?.["Classroom (FC28)"]       ?? "" },
-  { label: "Family Status",   wch: 14,  key: (r: any) => r.rawData?.["Family Status (FC28)"]   ?? "" },
-];
-
 const MAJOR_ORDER = ["Billing", "Adjustments", "Payment"];
 const SUB_ORDER: Record<string, string[]> = {
   Billing:     ["Regular", "Agency", "Early/Late", "One Time", "Other"],
@@ -65,30 +46,142 @@ const SUB_ORDER: Record<string, string[]> = {
   Payment:     ["Agency"],
 };
 
+const META_COLS = [
+  { label: "Child ID",        width: 11 },
+  { label: "Child Name",      width: 26 },
+  { label: "Center",          width: 24 },
+  { label: "Billing Cycle",   width: 14 },
+  { label: "Child Status",    width: 13 },
+  { label: "Start Date",      width: 13 },
+  { label: "Withdrawal Date", width: 16 },
+  { label: "Classroom",       width: 16 },
+  { label: "Family Status",   width: 14 },
+];
+
 export async function GET(req: NextRequest) {
   try {
     const sp      = new URL(req.url).searchParams;
     const batchId = sp.get("batchId");
-    const where: any = {};
-    if (batchId) where.batchId = batchId;
 
-    const rows = await db.fin14Row.findMany({ where, orderBy: { id: "asc" } });
-    if (!rows.length) return NextResponse.json({ error: "No FIN14 rows found" }, { status: 404 });
+    // ── 1. Aggregated pivot query (fast — returns ~child×category rows, not all txns) ──
+    const batchFilter = batchId ? `AND r."batchId" = $1` : "";
 
-    // ── Filter ────────────────────────────────────────────────────────────────
-    const filtered = rows.filter((r: any) => {
-      const fn  = String(r.rawData?.["Family Name"] ?? "").trim();
-      if (!fn || fn === "—" || fn === "-") return false;
-      const cid = String(r.rawData?.["Child ID"]   ?? "").trim();
-      if (!cid || cid === "—" || cid === "-") return false;
-      return true;
-    });
-    const excluded = rows.length - filtered.length;
+    type PivotRow = {
+      childId:       string;
+      childName:     string | null;
+      center:        string | null;
+      billingCycle:  string | null;
+      childStatus:   string | null;
+      startDate:     string | null;
+      withdrawalDate:string | null;
+      classroom:     string | null;
+      familyStatus:  string | null;
+      majorHead:     string | null;
+      subHead:       string | null;
+      amount:        string | null;   // Postgres returns numeric as string
+    };
 
-    // ── Determine value columns ───────────────────────────────────────────────
-    const colSet = new Set<string>();
-    for (const r of filtered) if (r.majorHead && r.subHead) colSet.add(`${r.majorHead}|||${r.subHead}`);
+    const pivotRows: PivotRow[] = await prisma.$queryRawUnsafe(
+      `SELECT
+         r."rawData"->>'Child ID'                          AS "childId",
+         MAX(r."rawData"->>'Child Name')                   AS "childName",
+         MAX(r."rawData"->>'Center')                       AS "center",
+         MAX(r."rawData"->>'Billing Cycle (FC28)')         AS "billingCycle",
+         MAX(r."rawData"->>'Child Status (FC28)')          AS "childStatus",
+         MAX(r."rawData"->>'Start Date (FC28)')            AS "startDate",
+         MAX(r."rawData"->>'Withdrawal Date (FC28)')       AS "withdrawalDate",
+         MAX(r."rawData"->>'Classroom (FC28)')             AS "classroom",
+         MAX(r."rawData"->>'Family Status (FC28)')         AS "familyStatus",
+         r."majorHead",
+         r."subHead",
+         SUM(
+           CASE
+             WHEN r."rawData"->>'Amount' IS NULL
+               OR trim(r."rawData"->>'Amount') = '' THEN 0
+             ELSE REGEXP_REPLACE(
+               REGEXP_REPLACE(r."rawData"->>'Amount', '[$, ]', '', 'g'),
+               '^\\((.+)\\)$', '-\\1'
+             )::numeric
+           END
+         ) AS "amount"
+       FROM "Fin14Row" r
+       WHERE length(trim(COALESCE(r."rawData"->>'Family Name', ''))) > 0
+         AND length(trim(COALESCE(r."rawData"->>'Child ID',   ''))) > 0
+         ${batchFilter}
+       GROUP BY "childId", r."majorHead", r."subHead"
+       ORDER BY MAX(r."rawData"->>'Center') NULLS LAST, "childId"`,
+      ...(batchId ? [batchId] : [])
+    );
 
+    if (!pivotRows.length) {
+      return NextResponse.json({ error: "No FIN14 rows found" }, { status: 404 });
+    }
+
+    // ── 2. Slim transactions query for the Transactions sheet ─────────────────
+    type TxnRow = {
+      childId:   string | null;
+      childName: string | null;
+      center:    string | null;
+      item:      string | null;
+      amount:    string | null;
+      majorHead: string | null;
+      subHead:   string | null;
+    };
+
+    const txnRows: TxnRow[] = await prisma.$queryRawUnsafe(
+      `SELECT
+         r."rawData"->>'Child ID'   AS "childId",
+         r."rawData"->>'Child Name' AS "childName",
+         r."rawData"->>'Center'     AS "center",
+         r."rawData"->>'Item'       AS "item",
+         r."rawData"->>'Amount'     AS "amount",
+         r."majorHead"              AS "majorHead",
+         r."subHead"                AS "subHead"
+       FROM "Fin14Row" r
+       WHERE length(trim(COALESCE(r."rawData"->>'Family Name', ''))) > 0
+         AND length(trim(COALESCE(r."rawData"->>'Child ID',   ''))) > 0
+         ${batchFilter}
+       ORDER BY r."rawData"->>'Center' NULLS LAST, r."rawData"->>'Child ID', r.id`,
+      ...(batchId ? [batchId] : [])
+    );
+
+    // ── 3. Build pivot map ────────────────────────────────────────────────────
+    type ChildEntry = {
+      meta:   { childId: string; childName: string; center: string; billingCycle: string; childStatus: string; startDate: string; withdrawalDate: string; classroom: string; familyStatus: string };
+      totals: Map<string, number>;
+    };
+
+    const colSet  = new Set<string>();
+    const childMap = new Map<string, ChildEntry>();
+
+    for (const r of pivotRows) {
+      const cid = String(r.childId ?? "").trim();
+      if (!cid) continue;
+      const colKey = `${r.majorHead ?? ""}|||${r.subHead ?? ""}`;
+      if (r.majorHead && r.subHead) colSet.add(colKey);
+
+      if (!childMap.has(cid)) {
+        childMap.set(cid, {
+          meta: {
+            childId:        cid,
+            childName:      r.childName    ?? "",
+            center:         r.center       ?? "",
+            billingCycle:   r.billingCycle ?? "",
+            childStatus:    r.childStatus  ?? "",
+            startDate:      r.startDate    ?? "",
+            withdrawalDate: r.withdrawalDate ?? "",
+            classroom:      r.classroom    ?? "",
+            familyStatus:   r.familyStatus ?? "",
+          },
+          totals: new Map(),
+        });
+      }
+      const entry = childMap.get(cid)!;
+      const amt   = parseMoney(r.amount);
+      entry.totals.set(colKey, (entry.totals.get(colKey) ?? 0) + amt);
+    }
+
+    // Order value columns by MAJOR_ORDER > SUB_ORDER > discovery
     const allCols: { major: string; sub: string }[] = [];
     for (const major of MAJOR_ORDER)
       for (const sub of SUB_ORDER[major] ?? [])
@@ -98,34 +191,16 @@ export async function GET(req: NextRequest) {
       if (!allCols.find(c => c.major === major && c.sub === sub)) allCols.push({ major, sub });
     }
 
-    // ── Build pivot ───────────────────────────────────────────────────────────
-    type PivotRow = { meta: (string | number)[]; totals: Map<string, number> };
-    const pivotMap = new Map<string, PivotRow>();
-
-    for (const r of filtered) {
-      const childId = String(r.rawData?.["Child ID"] ?? "").trim();
-      const colKey  = `${r.majorHead}|||${r.subHead}`;
-      const amount  = parseMoney(r.rawData?.["Amount"]);
-      if (!pivotMap.has(childId)) {
-        const cidNum = Number(childId);
-        const meta = ROW_FIELDS.map((f, i) => i === 0 && !isNaN(cidNum) ? cidNum : f.key(r));
-        pivotMap.set(childId, { meta, totals: new Map() });
-      }
-      const entry = pivotMap.get(childId)!;
-      entry.totals.set(colKey, (entry.totals.get(colKey) ?? 0) + amount);
-    }
-
-    // ── Sort by Center → Child ID numeric ────────────────────────────────────
-    const sorted = [...pivotMap.entries()].sort(([cidA, a], [cidB, b]) => {
-      const ca = String(a.meta[2]).toLowerCase();
-      const cb = String(b.meta[2]).toLowerCase();
+    const sorted = [...childMap.entries()].sort(([, a], [, b]) => {
+      const ca = a.meta.center.toLowerCase();
+      const cb = b.meta.center.toLowerCase();
       if (ca !== cb) return ca < cb ? -1 : 1;
-      return (Number(cidA) || 0) - (Number(cidB) || 0);
+      return (Number(a.meta.childId) || 0) - (Number(b.meta.childId) || 0);
     });
 
-    // ── Column totals ─────────────────────────────────────────────────────────
+    // Grand totals
     const colTotals = new Map<string, number>();
-    let grandTotal = 0;
+    let grandTotal  = 0;
     for (const [, { totals }] of sorted) {
       for (const col of allCols) {
         const k = `${col.major}|||${col.sub}`;
@@ -141,246 +216,222 @@ export async function GET(req: NextRequest) {
       majorTotals[col.major] = (majorTotals[col.major] ?? 0) + v;
     }
 
-    // ── Build workbook ────────────────────────────────────────────────────────
-    const wb = new ExcelJS.Workbook();
-    wb.creator  = "ASA Billing Intelligence";
-    wb.created  = new Date();
+    const numMeta = META_COLS.length;
+    const numVal  = allCols.length;
+    const lastCol = numMeta + numVal + 1; // +1 Grand Total
 
-    const ws = wb.addWorksheet("Final Report", {
+    // ── 4. Build workbook ─────────────────────────────────────────────────────
+    const wb = new ExcelJS.Workbook();
+    wb.creator = "ASA Billing Intelligence";
+    wb.created = new Date();
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SHEET 1 — Summary Report
+    // ═══════════════════════════════════════════════════════════════════════════
+    const ws = wb.addWorksheet("Summary Report", {
       views: [{ state: "frozen", xSplit: 3, ySplit: 11 }],
     });
 
-    const numMeta = ROW_FIELDS.length;
-    const numVal  = allCols.length;
-    const lastCol = numMeta + numVal + 1; // +1 for Grand Total
-
-    // Helper: set column widths
     ws.columns = [
-      ...ROW_FIELDS.map(f => ({ width: f.wch })),
+      ...META_COLS.map(c => ({ width: c.width })),
       ...allCols.map(() => ({ width: 13 })),
-      { width: 15 },  // Grand Total
+      { width: 15 },
     ];
 
-    // ── ROW 1: Title ──────────────────────────────────────────────────────────
-    const titleRow = ws.addRow(["ASA Billing Intelligence — FIN14 Final Report"]);
-    titleRow.height = 28;
-    const titleCell = titleRow.getCell(1);
-    titleCell.font   = { bold: true, size: 14, color: { argb: C.white } };
-    titleCell.fill   = fill(C.navy);
-    titleCell.alignment = { vertical: "middle", horizontal: "left", indent: 1 };
+    // Row 1: Title
+    const today = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
+    const r1 = ws.addRow(["ASA Billing Intelligence — FIN14 Final Report"]);
+    r1.height = 28;
+    const c1 = r1.getCell(1);
+    c1.font      = { bold: true, size: 14, color: { argb: C.white } };
+    c1.fill      = fill(C.navy);
+    c1.alignment = { vertical: "middle", horizontal: "left", indent: 1 };
     ws.mergeCells(1, 1, 1, lastCol);
 
-    // ── ROW 2: Generated date ─────────────────────────────────────────────────
-    const today = new Date().toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-    const genRow = ws.addRow([`Generated: ${today}`]);
-    genRow.height = 18;
-    genRow.getCell(1).font      = { italic: true, size: 9, color: { argb: "FF64748b" } };
-    genRow.getCell(1).fill      = fill(C.slate100);
-    genRow.getCell(1).alignment = { vertical: "middle", indent: 1 };
+    // Row 2: Generated date
+    const r2 = ws.addRow([`Generated: ${today}   |   Source data: see "Transactions" sheet`]);
+    r2.height = 18;
+    r2.getCell(1).font      = { italic: true, size: 9, color: { argb: "FF64748b" } };
+    r2.getCell(1).fill      = fill(C.slate100);
+    r2.getCell(1).alignment = { vertical: "middle", indent: 1 };
     ws.mergeCells(2, 1, 2, lastCol);
 
-    // ── ROW 3: blank ──────────────────────────────────────────────────────────
+    // Row 3: blank
     ws.addRow([]);
 
-    // ── ROW 4: KPI bar ────────────────────────────────────────────────────────
-    const kpiRow = ws.addRow([]);
-    kpiRow.height = 22;
-    const kpis = [
-      { label: "Total Children", value: sorted.length, col: 1 },
-      { label: "FIN14 Rows Used", value: filtered.length, col: 4 },
-      { label: "Rows Excluded",  value: excluded, col: 7 },
-    ];
-    for (const kpi of kpis) {
-      const lc = kpiRow.getCell(kpi.col);
-      const vc = kpiRow.getCell(kpi.col + 1);
-      lc.value = kpi.label;
-      lc.font  = { bold: true, size: 9, color: { argb: C.navy } };
-      lc.fill  = fill(C.blue50);
-      lc.alignment = { vertical: "middle", indent: 1 };
-      vc.value = kpi.value;
-      vc.font  = { bold: true, size: 10, color: { argb: C.navy } };
-      vc.fill  = fill(C.blue50);
-      vc.alignment = { vertical: "middle" };
-      ws.mergeCells(4, kpi.col, 4, kpi.col + 2);
-    }
-
-    // ── ROW 5: blank ──────────────────────────────────────────────────────────
-    ws.addRow([]);
-
-    // ── ROW 6: Amount summary header ──────────────────────────────────────────
-    const amtHdrRow = ws.addRow([]);
-    amtHdrRow.height = 20;
-    amtHdrRow.getCell(1).value = "Amount Summary";
-    amtHdrRow.getCell(1).font  = { bold: true, size: 9, color: { argb: C.white } };
-    amtHdrRow.getCell(1).fill  = fill(C.teal);
-    amtHdrRow.getCell(1).alignment = { vertical: "middle", indent: 1 };
-    ws.mergeCells(6, 1, 6, 3);
-    const amtLabels = [...MAJOR_ORDER, "Grand Total"];
-    amtLabels.forEach((lbl, i) => {
-      const c = amtHdrRow.getCell(4 + i);
-      c.value = lbl;
-      c.font  = { bold: true, size: 9, color: { argb: C.white } };
-      c.fill  = fill(C.teal);
-      c.alignment = { vertical: "middle", horizontal: "center" };
-      c.border = border("thin");
+    // Row 4: KPI bar
+    const r4 = ws.addRow([]);
+    r4.height = 22;
+    [
+      { label: "Total Children",  value: sorted.length,       col: 1 },
+      { label: "FIN14 Rows Used", value: txnRows.length,      col: 4 },
+      { label: "Rows Excluded",   value: pivotRows.length > txnRows.length ? 0 : 0, col: 7 },
+    ].forEach(({ label, value, col }) => {
+      const lc = r4.getCell(col);
+      const vc = r4.getCell(col + 1);
+      lc.value = label; lc.font = { bold: true, size: 9, color: { argb: C.navy } }; lc.fill = fill(C.blue50); lc.alignment = { vertical: "middle", indent: 1 };
+      vc.value = value; vc.font = { bold: true, size: 10, color: { argb: C.navy } }; vc.fill = fill(C.blue50); vc.alignment = { vertical: "middle" };
+      ws.mergeCells(4, col, 4, col + 2);
     });
 
-    // ── ROW 7: Amount summary values ──────────────────────────────────────────
-    const amtValRow = ws.addRow([]);
-    amtValRow.height = 20;
-    amtValRow.getCell(1).value = "Total";
-    amtValRow.getCell(1).font  = { bold: true, size: 9 };
-    amtValRow.getCell(1).fill  = fill(C.tealLight);
-    amtValRow.getCell(1).alignment = { vertical: "middle", indent: 1 };
+    // Row 5: blank
+    ws.addRow([]);
+
+    // Row 6: Amount summary header
+    const r6 = ws.addRow([]); r6.height = 20;
+    r6.getCell(1).value = "Amount Summary"; r6.getCell(1).font = { bold: true, size: 9, color: { argb: C.white } }; r6.getCell(1).fill = fill(C.teal); r6.getCell(1).alignment = { vertical: "middle", indent: 1 };
+    ws.mergeCells(6, 1, 6, 3);
+    [...MAJOR_ORDER, "Grand Total"].forEach((lbl, i) => {
+      const c = r6.getCell(4 + i);
+      c.value = lbl; c.font = { bold: true, size: 9, color: { argb: C.white } }; c.fill = fill(C.teal); c.alignment = { vertical: "middle", horizontal: "center" }; c.border = border("thin");
+    });
+
+    // Row 7: Amount summary values
+    const r7 = ws.addRow([]); r7.height = 20;
+    r7.getCell(1).value = "Total"; r7.getCell(1).font = { bold: true, size: 9 }; r7.getCell(1).fill = fill(C.tealLight); r7.getCell(1).alignment = { vertical: "middle", indent: 1 };
     ws.mergeCells(7, 1, 7, 3);
     MAJOR_ORDER.forEach((major, i) => {
-      const c = amtValRow.getCell(4 + i);
-      c.value      = majorTotals[major] ?? 0;
-      c.numFmt     = "#,##0.00";
-      c.font       = { bold: true, size: 9, color: { argb: (majorTotals[major] ?? 0) >= 0 ? C.slate700 : "FFdc2626" } };
-      c.fill       = fill(C.tealLight);
-      c.alignment  = { vertical: "middle", horizontal: "right" };
-      c.border     = border("thin");
+      const c = r7.getCell(4 + i);
+      c.value = majorTotals[major] ?? 0; c.numFmt = "#,##0.00"; c.font = { bold: true, size: 9 }; c.fill = fill(C.tealLight); c.alignment = { vertical: "middle", horizontal: "right" }; c.border = border("thin");
     });
-    const gtCell = amtValRow.getCell(4 + MAJOR_ORDER.length);
-    gtCell.value     = grandTotal;
-    gtCell.numFmt    = "#,##0.00";
-    gtCell.font      = { bold: true, size: 9, color: { argb: grandTotal >= 0 ? C.green : "FFdc2626" } };
-    gtCell.fill      = fill(C.tealLight);
-    gtCell.alignment = { vertical: "middle", horizontal: "right" };
-    gtCell.border    = border("thin");
+    const gtAmt = r7.getCell(4 + MAJOR_ORDER.length);
+    gtAmt.value = grandTotal; gtAmt.numFmt = "#,##0.00"; gtAmt.font = { bold: true, size: 9, color: { argb: grandTotal >= 0 ? C.green : C.red } }; gtAmt.fill = fill(C.tealLight); gtAmt.alignment = { vertical: "middle", horizontal: "right" }; gtAmt.border = border("thin");
 
-    // ── ROW 8: blank ──────────────────────────────────────────────────────────
+    // Row 8: blank
     ws.addRow([]);
 
-    // ── ROW 9: Major Head header ──────────────────────────────────────────────
-    const hdr1Row = ws.addRow([]);
-    hdr1Row.height = 20;
-    ROW_FIELDS.forEach((f, ci) => {
-      const c = hdr1Row.getCell(ci + 1);
-      c.value     = f.label;
-      c.font      = { bold: true, size: 9, color: { argb: C.white } };
-      c.fill      = fill(C.navy);
-      c.alignment = { vertical: "middle", horizontal: "center", wrapText: true };
-      c.border    = medBorder();
+    // Row 9: Major Head header
+    const r9 = ws.addRow([]); r9.height = 20;
+    META_COLS.forEach((col, ci) => {
+      const c = r9.getCell(ci + 1);
+      c.value = col.label; c.font = { bold: true, size: 9, color: { argb: C.white } }; c.fill = fill(C.navy); c.alignment = { vertical: "middle", horizontal: "center", wrapText: true }; c.border = medBorder();
     });
     allCols.forEach((col, ci) => {
-      const c = hdr1Row.getCell(numMeta + ci + 1);
-      c.value     = col.major;
-      c.font      = { bold: true, size: 9, color: { argb: C.white } };
-      c.fill      = fill(C.navy);
-      c.alignment = { vertical: "middle", horizontal: "center" };
-      c.border    = medBorder();
+      const c = r9.getCell(numMeta + ci + 1);
+      c.value = col.major; c.font = { bold: true, size: 9, color: { argb: C.white } }; c.fill = fill(C.navy); c.alignment = { vertical: "middle", horizontal: "center" }; c.border = medBorder();
     });
-    const gtHdr1 = hdr1Row.getCell(lastCol);
-    gtHdr1.value     = "Grand Total";
-    gtHdr1.font      = { bold: true, size: 9, color: { argb: C.white } };
-    gtHdr1.fill      = fill(C.navy);
-    gtHdr1.alignment = { vertical: "middle", horizontal: "center" };
-    gtHdr1.border    = medBorder();
+    const gtH1 = r9.getCell(lastCol);
+    gtH1.value = "Grand Total"; gtH1.font = { bold: true, size: 9, color: { argb: C.white } }; gtH1.fill = fill(C.navy); gtH1.alignment = { vertical: "middle", horizontal: "center" }; gtH1.border = medBorder();
 
-    // ── ROW 10: Sub Head header ───────────────────────────────────────────────
-    const hdr2Row = ws.addRow([]);
-    hdr2Row.height = 18;
-    ROW_FIELDS.forEach((_, ci) => {
-      const c = hdr2Row.getCell(ci + 1);
-      c.value     = "";
-      c.fill      = fill(C.navyLight);
-      c.border    = border("thin");
-    });
+    // Row 10: Sub Head header
+    const r10 = ws.addRow([]); r10.height = 18;
+    META_COLS.forEach((_, ci) => { const c = r10.getCell(ci + 1); c.fill = fill(C.navyLight); c.border = border("thin"); });
     allCols.forEach((col, ci) => {
-      const c = hdr2Row.getCell(numMeta + ci + 1);
-      c.value     = col.sub;
-      c.font      = { bold: true, size: 8, color: { argb: C.white } };
-      c.fill      = fill(C.navyLight);
-      c.alignment = { vertical: "middle", horizontal: "center" };
-      c.border    = border("thin");
+      const c = r10.getCell(numMeta + ci + 1);
+      c.value = col.sub; c.font = { bold: true, size: 8, color: { argb: C.white } }; c.fill = fill(C.navyLight); c.alignment = { vertical: "middle", horizontal: "center" }; c.border = border("thin");
     });
-    const gtHdr2 = hdr2Row.getCell(lastCol);
-    gtHdr2.value     = "";
-    gtHdr2.fill      = fill(C.navyLight);
-    gtHdr2.border    = border("thin");
+    r10.getCell(lastCol).fill = fill(C.navyLight); r10.getCell(lastCol).border = border("thin");
 
-    // Autofilter on the Major Head row (row 9)
-    ws.autoFilter = {
-      from: { row: 9, column: 1 },
-      to:   { row: 9, column: lastCol },
-    };
+    ws.autoFilter = { from: { row: 9, column: 1 }, to: { row: 9, column: lastCol } };
 
-    // ── DATA ROWS ─────────────────────────────────────────────────────────────
+    // Data rows
     let dataRow = 11;
     for (const [, { meta, totals }] of sorted) {
-      const row   = ws.addRow([]);
-      row.height  = 16;
-      const isAlt = (dataRow % 2 === 0);
+      const row    = ws.addRow([]); row.height = 16;
+      const isAlt  = dataRow % 2 === 0;
       const rowFill = fill(isAlt ? C.altRow : C.white);
 
-      // Meta cells
-      meta.forEach((v, ci) => {
+      const metaValues = [
+        isNaN(Number(meta.childId)) ? meta.childId : Number(meta.childId),
+        meta.childName, meta.center, meta.billingCycle, meta.childStatus,
+        meta.startDate, meta.withdrawalDate, meta.classroom, meta.familyStatus,
+      ];
+      metaValues.forEach((v, ci) => {
         const c = row.getCell(ci + 1);
-        c.value     = v;
-        c.fill      = rowFill;
-        c.font      = { size: 9 };
+        c.value = v; c.fill = rowFill; c.font = { size: 9 };
         c.alignment = { vertical: "middle", horizontal: ci === 0 ? "right" : "left", indent: ci > 0 ? 1 : 0 };
-        c.border    = border("hair");
+        c.border = border("hair");
       });
 
-      // Value cells
       let rowTotal = 0;
       allCols.forEach((col, ci) => {
         const v = totals.get(`${col.major}|||${col.sub}`) ?? 0;
         const c = row.getCell(numMeta + ci + 1);
-        c.value     = v;
-        c.numFmt    = "#,##0.00";
-        c.fill      = rowFill;
-        c.font      = { size: 9, color: { argb: v < 0 ? C.red : C.slate700 } };
-        c.alignment = { vertical: "middle", horizontal: "right" };
-        c.border    = border("hair");
-        rowTotal   += v;
+        c.value = v; c.numFmt = "#,##0.00"; c.fill = rowFill;
+        c.font = { size: 9, color: { argb: v < 0 ? C.red : C.slate700 } };
+        c.alignment = { vertical: "middle", horizontal: "right" }; c.border = border("hair");
+        rowTotal += v;
       });
 
-      // Grand Total cell
       const gtc = row.getCell(lastCol);
-      gtc.value     = rowTotal;
-      gtc.numFmt    = "#,##0.00";
-      gtc.fill      = fill(isAlt ? "FFe0ecff" : C.blue50);
-      gtc.font      = { bold: true, size: 9, color: { argb: rowTotal < 0 ? C.red : C.navy } };
-      gtc.alignment = { vertical: "middle", horizontal: "right" };
-      gtc.border    = border("thin");
+      gtc.value = rowTotal; gtc.numFmt = "#,##0.00";
+      gtc.fill = fill(isAlt ? "FFe0ecff" : C.blue50);
+      gtc.font = { bold: true, size: 9, color: { argb: rowTotal < 0 ? C.red : C.navy } };
+      gtc.alignment = { vertical: "middle", horizontal: "right" }; gtc.border = border("thin");
 
       dataRow++;
     }
 
-    // ── GRAND TOTAL ROW ───────────────────────────────────────────────────────
-    const totRow  = ws.addRow([]);
-    totRow.height = 20;
-    const gtLabel = totRow.getCell(1);
-    gtLabel.value     = "GRAND TOTAL";
-    gtLabel.font      = { bold: true, size: 10, color: { argb: C.white } };
-    gtLabel.fill      = fill(C.totals);
-    gtLabel.alignment = { vertical: "middle", indent: 1 };
-    gtLabel.border    = medBorder();
+    // Grand total footer
+    const rTot = ws.addRow([]); rTot.height = 20;
+    const gtLbl = rTot.getCell(1);
+    gtLbl.value = "GRAND TOTAL"; gtLbl.font = { bold: true, size: 10, color: { argb: C.white } };
+    gtLbl.fill = fill(C.navyDark); gtLbl.alignment = { vertical: "middle", indent: 1 }; gtLbl.border = medBorder();
     ws.mergeCells(dataRow, 1, dataRow, numMeta);
-
     allCols.forEach((col, ci) => {
       const v = colTotals.get(`${col.major}|||${col.sub}`) ?? 0;
-      const c = totRow.getCell(numMeta + ci + 1);
-      c.value     = v;
-      c.numFmt    = "#,##0.00";
-      c.fill      = fill(C.totals);
-      c.font      = { bold: true, size: 9, color: { argb: C.white } };
-      c.alignment = { vertical: "middle", horizontal: "right" };
-      c.border    = medBorder();
+      const c = rTot.getCell(numMeta + ci + 1);
+      c.value = v; c.numFmt = "#,##0.00"; c.fill = fill(C.navyDark);
+      c.font = { bold: true, size: 9, color: { argb: C.white } };
+      c.alignment = { vertical: "middle", horizontal: "right" }; c.border = medBorder();
     });
-    const totGT = totRow.getCell(lastCol);
-    totGT.value     = grandTotal;
-    totGT.numFmt    = "#,##0.00";
-    totGT.fill      = fill(C.totals);
-    totGT.font      = { bold: true, size: 10, color: { argb: C.white } };
-    totGT.alignment = { vertical: "middle", horizontal: "right" };
-    totGT.border    = medBorder();
+    const totGT = rTot.getCell(lastCol);
+    totGT.value = grandTotal; totGT.numFmt = "#,##0.00"; totGT.fill = fill(C.navyDark);
+    totGT.font = { bold: true, size: 10, color: { argb: C.white } };
+    totGT.alignment = { vertical: "middle", horizontal: "right" }; totGT.border = medBorder();
 
-    // ── Write & respond ───────────────────────────────────────────────────────
+    // ═══════════════════════════════════════════════════════════════════════════
+    // SHEET 2 — Transactions (raw rows, numeric Amount, for drill-down)
+    // ═══════════════════════════════════════════════════════════════════════════
+    const ws2 = wb.addWorksheet("Transactions", {
+      views: [{ state: "frozen", xSplit: 0, ySplit: 1 }],
+    });
+
+    ws2.columns = [
+      { width: 11 }, { width: 26 }, { width: 24 },
+      { width: 13 }, { width: 13 },
+      { width: 15 }, { width: 15 },
+    ];
+
+    const txnHeaders = ["Child ID", "Child Name", "Center", "Item", "Amount", "Major Head", "Sub Head"];
+    const hRow = ws2.addRow(txnHeaders);
+    hRow.height = 18;
+    hRow.eachCell((cell) => {
+      cell.font      = { bold: true, size: 9, color: { argb: C.white } };
+      cell.fill      = fill(C.navy);
+      cell.alignment = { vertical: "middle", horizontal: "center" };
+      cell.border    = medBorder();
+    });
+
+    ws2.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: txnHeaders.length } };
+
+    let txnRow = 2;
+    for (const r of txnRows) {
+      const amt    = parseMoney(r.amount);
+      const isAlt  = txnRow % 2 === 0;
+      const rowFill = fill(isAlt ? C.altRow : C.white);
+      const row2   = ws2.addRow([
+        isNaN(Number(r.childId)) ? (r.childId ?? "") : Number(r.childId),
+        r.childName  ?? "",
+        r.center     ?? "",
+        r.item       ?? "",
+        amt,
+        r.majorHead  ?? "",
+        r.subHead    ?? "",
+      ]);
+      row2.height = 15;
+      row2.eachCell((cell, col) => {
+        cell.fill      = rowFill;
+        cell.font      = { size: 9 };
+        cell.border    = border("hair");
+        if (col === 5) { cell.numFmt = "#,##0.00"; cell.alignment = { horizontal: "right" }; if (amt < 0) cell.font = { size: 9, color: { argb: C.red } }; }
+        else if (col === 1) { cell.alignment = { horizontal: "right" }; }
+        else { cell.alignment = { horizontal: "left", indent: 1 }; }
+      });
+      txnRow++;
+    }
+
+    // ── Generate & respond ────────────────────────────────────────────────────
     const buf      = await wb.xlsx.writeBuffer();
     const filename = `FIN14_Final_Report_${new Date().toISOString().slice(0, 10)}.xlsx`;
 
@@ -389,10 +440,11 @@ export async function GET(req: NextRequest) {
         "Content-Type":        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         "Content-Disposition": `attachment; filename="${filename}"`,
         "X-Pivot-Rows":        String(sorted.length),
-        "X-Excluded-Rows":     String(excluded),
+        "X-Txn-Rows":          String(txnRows.length),
       },
     });
   } catch (err: any) {
+    console.error("final-report error:", err);
     return NextResponse.json({ error: err.message ?? "Report generation failed" }, { status: 500 });
   }
 }
