@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import ExcelJS from "exceljs";
 
-export const maxDuration = 60;
+export const maxDuration = 300;
 
 // ── Colours ───────────────────────────────────────────────────────────────────
 const C = {
@@ -472,31 +472,18 @@ export async function GET(req: NextRequest) {
 
     ws2.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: txnHeaders.length } };
 
-    let txnRow = 2;
-    for (const r of txnRows) {
-      const amt    = parseMoney(r.amount);
-      const isAlt  = txnRow % 2 === 0;
-      const rowFill = fill(isAlt ? C.altRow : C.white);
-      const row2   = ws2.addRow([
-        isNaN(Number(r.childId)) ? (r.childId ?? "") : Number(r.childId),
-        r.childName  ?? "",
-        r.center     ?? "",
-        r.item       ?? "",
-        amt,
-        r.majorHead  ?? "",
-        r.subHead    ?? "",
-      ]);
-      row2.height = 15;
-      row2.eachCell((cell, col) => {
-        cell.fill      = rowFill;
-        cell.font      = { size: 9 };
-        cell.border    = border("hair");
-        if (col === 5) { cell.numFmt = "#,##0.00"; cell.alignment = { horizontal: "right" }; if (amt < 0) cell.font = { size: 9, color: { argb: C.red } }; }
-        else if (col === 1) { cell.alignment = { horizontal: "right" }; }
-        else { cell.alignment = { horizontal: "left", indent: 1 }; }
-      });
-      txnRow++;
-    }
+    // Bulk-insert all transaction rows — avoids per-cell overhead on 200k+ rows
+    ws2.addRows(txnRows.map(r => [
+      isNaN(Number(r.childId)) ? (r.childId ?? "") : Number(r.childId),
+      r.childName ?? "",
+      r.center    ?? "",
+      r.item      ?? "",
+      parseMoney(r.amount),
+      r.majorHead ?? "",
+      r.subHead   ?? "",
+    ]));
+    // Style the Amount column (col E) for the whole sheet
+    ws2.getColumn(5).numFmt = "#,##0.00";
 
     // ── Generate & respond ────────────────────────────────────────────────────
     const buf      = await wb.xlsx.writeBuffer();
