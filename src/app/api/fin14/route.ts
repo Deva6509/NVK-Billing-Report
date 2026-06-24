@@ -21,7 +21,7 @@ function buildWhere(sp: URLSearchParams | Record<string, string | undefined>) {
 }
 
 // GET /api/fin14?latestBatch=1  → { batchId }
-// GET /api/fin14                → paginated rows
+// GET /api/fin14                → paginated rows (defaults to latest batch)
 export async function GET(req: NextRequest) {
   const sp = new URL(req.url).searchParams;
 
@@ -32,16 +32,29 @@ export async function GET(req: NextRequest) {
     return NextResponse.json({ batchId: rows[0]?.batchId ?? null });
   }
 
+  // If no batchId given, resolve to latest so we never show cross-batch data
+  let batchId = sp.get("batchId");
+  if (!batchId) {
+    const latest = await prisma.$queryRawUnsafe<{ batchId: string }[]>(
+      `SELECT "batchId" FROM "Fin14Row" ORDER BY id DESC LIMIT 1`
+    );
+    batchId = latest[0]?.batchId ?? null;
+  }
+
+  // Rebuild URLSearchParams with the resolved batchId for buildWhere
+  const resolved = new URLSearchParams(sp);
+  if (batchId) resolved.set("batchId", batchId);
+
   const page     = Math.max(1, Number(sp.get("page") ?? 1));
   const pageSize = Math.min(200, Math.max(10, Number(sp.get("pageSize") ?? 100)));
-  const where    = buildWhere(sp);
+  const where    = buildWhere(resolved);
 
   const [total, rows] = await Promise.all([
     db.fin14Row.count({ where }),
     db.fin14Row.findMany({ where, orderBy: { id: "asc" }, skip: (page - 1) * pageSize, take: pageSize }),
   ]);
 
-  return NextResponse.json({ total, page, pageSize, rows });
+  return NextResponse.json({ total, page, pageSize, rows, batchId });
 }
 
 // PATCH /api/fin14
