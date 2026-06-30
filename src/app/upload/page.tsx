@@ -548,163 +548,6 @@ function Step1({ onDone }: { onDone: (batchId: string) => void }) {
   );
 }
 
-function Step2({ locked }: { locked: boolean }) {
-  const [files,       setFiles]       = useState<File[]>([]);
-  const [uploading,   setUploading]   = useState(false);
-  const [results,     setResults]     = useState<{ center: string; rowsInserted: number }[]>([]);
-  const [error,       setError]       = useState<string | null>(null);
-  const [dbStats,     setDbStats]     = useState<{ totalInDb: number; centers: { center: string; rowCount: number }[] } | null>(null);
-
-  const loadStats = async () => {
-    try {
-      const res = await fetch("/api/rate-master/sync");
-      if (res.ok) setDbStats(await res.json());
-    } catch {}
-  };
-
-  useEffect(() => { loadStats(); }, []);
-
-  const addFiles = useCallback((incoming: File[]) => {
-    setFiles((prev) => {
-      const names = new Set(prev.map((f) => f.name));
-      return [...prev, ...incoming.filter((f) => !names.has(f.name))];
-    });
-    setResults([]); setError(null);
-  }, []);
-
-  const upload = async () => {
-    if (!files.length) return;
-    setUploading(true); setResults([]); setError(null);
-    try {
-      const XLSX = await import("xlsx");
-      const done: { center: string; rowsInserted: number }[] = [];
-
-      for (const file of files) {
-        const buf  = await file.arrayBuffer();
-        const wb   = XLSX.read(buf, { type: "buffer" });
-        const ws   = wb.Sheets[wb.SheetNames[0]];
-        const raw  = XLSX.utils.sheet_to_json(ws, { header: 1, defval: null }) as any[][];
-
-        const centerFull = String(raw[0]?.[0] ?? "").trim();
-        // Parse data rows: skip row 0 (center), row 1 (headers)
-        // Family rows: col[0] has text, col[1] is null → skip
-        // Total rows: col[3] contains "Total" → skip
-        const rows: { cycle: string; item: string; childName: string; payer?: string; amount: string; rateSheet?: string }[] = [];
-        for (let i = 2; i < raw.length; i++) {
-          const r = raw[i];
-          if (!r[0]) continue;                           // blank row
-          if (r[0] && !r[1] && !r[2]) continue;         // family header row
-          if (r[3] && String(r[3]).toLowerCase().includes("total")) continue; // total row
-          if (!r[1] || !r[2]) continue;                  // missing item or child
-          rows.push({
-            cycle:     String(r[0] ?? ""),
-            item:      String(r[1] ?? ""),
-            childName: String(r[2] ?? ""),
-            payer:     r[3] ? String(r[3]) : undefined,
-            amount:    String(r[4] ?? "0"),
-            rateSheet: r[5] ? String(r[5]) : undefined,
-          });
-        }
-
-        const res  = await fetch("/api/rate-master/sync", {
-          method:  "POST",
-          headers: { "Content-Type": "application/json" },
-          body:    JSON.stringify({ centerFull, rows }),
-        });
-        const data = await res.json();
-        if (!res.ok) throw new Error(data.error ?? "Upload failed");
-        done.push({ center: data.center, rowsInserted: data.rowsInserted });
-      }
-
-      setResults(done);
-      setFiles([]);
-      await loadStats();
-    } catch (e: any) {
-      setError(e.message);
-    } finally {
-      setUploading(false);
-    }
-  };
-
-  return (
-    <div className={`rounded-2xl border shadow-sm overflow-hidden transition-all ${locked ? "border-gray-200 opacity-60" : "border-purple-200"}`}>
-      <div className="px-6 py-4 flex items-center gap-4" style={{ background: locked ? "#f9fafb" : "#f5f3ff" }}>
-        <div className="w-10 h-10 rounded-xl flex items-center justify-center text-white font-black text-sm flex-shrink-0 shadow"
-          style={{ background: locked ? "#d1d5db" : "#7c3aed" }}>
-          {locked ? <Lock className="w-5 h-5" /> : "2"}
-        </div>
-        <div className="flex-1">
-          <h3 className="text-sm font-bold text-gray-800">Step 2 — Upload FIN02 Rate Master Files</h3>
-          <p className="text-xs text-gray-500 mt-0.5">
-            Upload FIN02 Contract Charges files (one per center). Contracted rates will appear in the Final Report alongside billed amounts.
-          </p>
-        </div>
-        {locked && <Badge variant="gray">Complete Step 1 first</Badge>}
-      </div>
-
-      {!locked && (
-        <div className="p-6 space-y-4">
-          {/* DB stats */}
-          {dbStats && dbStats.totalInDb > 0 && (
-            <div className="flex items-center justify-between text-xs text-gray-500">
-              <span className="font-semibold text-gray-700">{dbStats.totalInDb.toLocaleString()} rate rows in DB</span>
-              <div className="flex flex-wrap gap-1.5 justify-end">
-                {dbStats.centers.map((c) => (
-                  <span key={c.center} className="bg-purple-50 text-purple-700 border border-purple-100 px-2 py-0.5 rounded-full font-medium">
-                    {c.center} ({c.rowCount})
-                  </span>
-                ))}
-              </div>
-            </div>
-          )}
-
-          <DropZone onFiles={addFiles} disabled={uploading} color="#7c3aed" />
-
-          {files.length > 0 && (
-            <div className="space-y-1">
-              {files.map((f) => (
-                <div key={f.name} className="flex items-center justify-between px-3 py-1.5 bg-purple-50 rounded-lg text-xs">
-                  <span className="font-medium text-purple-800 truncate">{f.name}</span>
-                  <button onClick={() => setFiles((p) => p.filter((x) => x.name !== f.name))} className="ml-2 text-purple-400 hover:text-purple-700 flex-shrink-0">
-                    <X className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-              ))}
-            </div>
-          )}
-
-          <div className="flex items-center gap-3 flex-wrap">
-            <button
-              onClick={upload}
-              disabled={uploading || !files.length}
-              className="flex items-center gap-2 px-5 py-2.5 rounded-xl text-sm font-bold text-white transition-all disabled:opacity-40 hover:brightness-110"
-              style={{ background: "#7c3aed" }}
-            >
-              {uploading
-                ? <><RefreshCw className="w-4 h-4 animate-spin" />Uploading {files.length} file{files.length !== 1 ? "s" : ""}…</>
-                : <><Database className="w-4 h-4" />Upload Rate Master {files.length > 0 ? `(${files.length})` : ""}</>}
-            </button>
-            {results.length > 0 && (
-              <div className="text-xs text-green-600 font-medium flex items-center gap-1">
-                <CheckCircle2 className="w-3.5 h-3.5" />
-                {results.map((r) => `${r.center}: ${r.rowsInserted} rows`).join(" · ")}
-              </div>
-            )}
-            {error && <span className="text-xs text-red-500 flex items-center gap-1"><XCircle className="w-3.5 h-3.5" />{error}</span>}
-          </div>
-
-          <div className="bg-purple-50 border border-purple-100 rounded-lg px-4 py-2.5 flex items-start gap-2">
-            <FileSpreadsheet className="w-3.5 h-3.5 text-purple-600 mt-0.5 flex-shrink-0" />
-            <p className="text-xs text-purple-700">
-              <span className="font-semibold">Each FIN02 file = one center.</span> Upload all centers before generating the Final Report. The report will show <strong>Contracted Rate</strong> and <strong>Variance</strong> columns per child.
-            </p>
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
 function Step3({ locked }: { locked: boolean }) {
   return (
     <div className={`rounded-2xl border shadow-sm overflow-hidden transition-all ${locked ? "border-gray-200 opacity-60" : "border-gray-200"}`}>
@@ -750,7 +593,6 @@ export default function UploadPage() {
           <div className="flex items-center gap-2">
             {[
               { label: "FIN14 Transactions", done: step1Done },
-              { label: "FIN02 Rate Master",  done: false },
               { label: "Process Data",        done: false },
             ].map((s, i) => (
               <div key={s.label} className="flex items-center gap-2 flex-1">
@@ -760,14 +602,13 @@ export default function UploadPage() {
                   {s.done && <CheckCircle2 className="w-3.5 h-3.5" />}
                   {s.label}
                 </div>
-                {i < 2 && <ChevronRight className="w-4 h-4 text-gray-300 flex-shrink-0" />}
+                {i < 1 && <ChevronRight className="w-4 h-4 text-gray-300 flex-shrink-0" />}
               </div>
             ))}
           </div>
         </div>
 
         <Step1 onDone={(bid) => { setStep1Done(true); }} />
-        <Step2 locked={false} />
         <Step3 locked={true} />
 
       </div>

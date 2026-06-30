@@ -815,6 +815,39 @@ model FC28Row {
   @@index([center])
 }
 
+// ─── Rate Sheet Upload (center-wise, unpivoted) ──────────────────────────────
+
+model RateSheetBatch {
+  id         String         @id @default(cuid())
+  uploadedAt DateTime       @default(now())
+  fileCount  Int            @default(0)
+  rowCount   Int            @default(0)
+  rows       RateSheetRow[]
+}
+
+model RateSheetRow {
+  id          Int            @id @default(autoincrement())
+  batchId     String
+  batch       RateSheetBatch @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  sourceFile  String?
+  center      String?
+  entity      String?
+  versionName String?
+  created     String?
+  modified    String?
+  active      String?
+  dropOff     String?
+  pickUp      String?
+  program     String?
+  itemName    String?
+  itemValue   String?
+  createdAt   DateTime       @default(now())
+
+  @@index([batchId])
+  @@index([center])
+  @@index([itemName])
+}
+
 // ─── FC28 History Records (legacy — kept for old data) ───────────────────────
 
 model FC28Record {
