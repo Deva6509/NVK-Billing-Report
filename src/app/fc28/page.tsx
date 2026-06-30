@@ -123,7 +123,8 @@ export default function FC28Page() {
       for (let i = 0; i < files.length; i++) {
         const file = files[i];
         setUploadLog(prev => [...prev, `Parsing ${file.name}…`]);
-        const XLSX = (await import("xlsx")).default;
+        const xlsxMod = await import("xlsx");
+        const XLSX = (xlsxMod as any).default ?? xlsxMod;
         const buf  = await file.arrayBuffer();
         const wb   = XLSX.read(buf, { type: "array", raw: true });
         const ws   = wb.Sheets[wb.SheetNames[0]];
