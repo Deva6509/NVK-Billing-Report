@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 
-export const maxDuration = 300;
+export const maxDuration = 60;
 
 const db = prisma as any;
 
@@ -17,12 +17,9 @@ function to24h(t: string | null): string {
 }
 
 // POST /api/fc28/recompute-keys
-// Re-applies current ClassroomMapping to all rows in the latest FC28 batch,
-// updating rateCardKey, revisedClassroom, earlyAMRateCardKey, latePMRateCardKey.
-// Call this after saving new classroom mappings without re-uploading FC28.
+// Uses DISTINCT combinations so 38k rows → ~200-500 groups → one bulk SQL UPDATE.
 export async function POST() {
   try {
-    // 1. Load classroom mappings
     const classroomMappingRows: { fc28Classroom: string; rateSheetItem: string | null }[] =
       await db.classroomMapping.findMany();
     const classroomMap = new Map<string, string>();
@@ -30,66 +27,79 @@ export async function POST() {
       if (c.rateSheetItem) classroomMap.set(c.fc28Classroom, c.rateSheetItem);
     }
 
-    // 2. Latest FC28 batch
     const latestBatch = await db.fC28Batch.findFirst({ orderBy: { reportDate: "desc" } });
     if (!latestBatch) return NextResponse.json({ error: "No FC28 batch found" }, { status: 404 });
 
-    // 3. Load all rows (only needed fields)
-    const rows: any[] = await prisma.$queryRawUnsafe(
-      `SELECT id, center, "rateSheet", "dropOff", pickup, program, classroom FROM "FC28Row" WHERE "batchId" = $1`,
+    // Load only distinct field combinations — vastly fewer rows than total
+    const combos: any[] = await prisma.$queryRawUnsafe(
+      `SELECT DISTINCT
+         COALESCE(center,      '') AS center,
+         COALESCE("rateSheet", '') AS "rateSheet",
+         COALESCE("dropOff",   '') AS "dropOff",
+         COALESCE(pickup,      '') AS pickup,
+         COALESCE(program,     '') AS program,
+         COALESCE(classroom,   '') AS classroom
+       FROM "FC28Row"
+       WHERE "batchId" = $1`,
       latestBatch.id
     );
 
-    let updated = 0, unmapped = 0;
-    const BATCH = 500;
+    let mapped = 0, unmapped = 0;
+    const valueParts: string[] = [];
+    const params: any[] = [];
+    let pi = 1;
 
-    for (let i = 0; i < rows.length; i += BATCH) {
-      const chunk = rows.slice(i, i + BATCH);
-      const updates: string[] = [];
-      const params: any[] = [];
-      let pi = 1;
+    for (const c of combos) {
+      const centerShort        = c.center.split(",")[0].trim();
+      const classroom          = c.classroom;
+      const revisedClassroom   = classroom ? (classroomMap.get(classroom) ?? null) : null;
+      const effectiveClassroom = revisedClassroom ?? classroom;
+      const dropOff24          = to24h(c.dropOff  || null);
+      const pickup24           = to24h(c.pickup    || null);
+      const rateSheet          = c.rateSheet;
+      const program            = c.program;
 
-      for (const row of chunk) {
-        const centerShort        = (row.center ?? "").split(",")[0].trim();
-        const classroom          = row.classroom ?? "";
-        const revisedClassroom   = classroom ? (classroomMap.get(classroom) ?? null) : null;
-        const effectiveClassroom = revisedClassroom ?? classroom;
-        const dropOff24          = to24h(row.dropOff);
-        const pickup24           = to24h(row.pickup);
-        const rateSheet          = row.rateSheet ?? "";
-        const program            = row.program ?? "";
+      const rateCardKey        = [centerShort, rateSheet, dropOff24, pickup24, program,          effectiveClassroom].join("|");
+      const earlyAMRateCardKey = [centerShort, rateSheet, dropOff24, pickup24, "Early AM Care",  effectiveClassroom].join("|");
+      const latePMRateCardKey  = [centerShort, rateSheet, dropOff24, pickup24, "Late PM Care",   effectiveClassroom].join("|");
 
-        const rateCardKey        = [centerShort, rateSheet, dropOff24, pickup24, program,           effectiveClassroom].join("|");
-        const earlyAMRateCardKey = [centerShort, rateSheet, dropOff24, pickup24, "Early AM Care",   effectiveClassroom].join("|");
-        const latePMRateCardKey  = [centerShort, rateSheet, dropOff24, pickup24, "Late PM Care",    effectiveClassroom].join("|");
+      revisedClassroom ? mapped++ : unmapped++;
 
-        if (!revisedClassroom) unmapped++;
+      valueParts.push(
+        `($${pi},$${pi+1},$${pi+2},$${pi+3},$${pi+4},$${pi+5},$${pi+6},$${pi+7}::text,$${pi+8},$${pi+9})`
+      );
+      params.push(
+        c.center, c.rateSheet, c.dropOff, c.pickup, c.program, c.classroom,
+        rateCardKey, revisedClassroom, earlyAMRateCardKey, latePMRateCardKey
+      );
+      pi += 10;
+    }
 
-        updates.push(`($${pi}::int, $${pi+1}, $${pi+2}, $${pi+3}, $${pi+4}, $${pi+5})`);
-        params.push(row.id, rateCardKey, revisedClassroom, earlyAMRateCardKey, latePMRateCardKey, effectiveClassroom);
-        pi += 6;
-        updated++;
-      }
-
-      if (updates.length) {
-        await prisma.$executeRawUnsafe(
-          `UPDATE "FC28Row" AS t
-           SET "rateCardKey"        = v.rck,
-               "revisedClassroom"   = v.rc,
-               "earlyAMRateCardKey" = v.eam,
-               "latePMRateCardKey"  = v.lpm
-           FROM (VALUES ${updates.join(",")}) AS v(id, rck, rc, eam, lpm, eff)
-           WHERE t.id = v.id::int`,
-          ...params
-        );
-      }
+    if (valueParts.length > 0) {
+      params.push(latestBatch.id);
+      await prisma.$executeRawUnsafe(
+        `UPDATE "FC28Row" AS t
+         SET "rateCardKey"        = v.rck,
+             "revisedClassroom"   = v.rc,
+             "earlyAMRateCardKey" = v.eam,
+             "latePMRateCardKey"  = v.lpm
+         FROM (VALUES ${valueParts.join(",")}) AS v(ctr,rs,doff,pup,prog,cls,rck,rc,eam,lpm)
+         WHERE t."batchId" = $${pi}
+           AND COALESCE(t.center,      '') = v.ctr
+           AND COALESCE(t."rateSheet", '') = v.rs
+           AND COALESCE(t."dropOff",   '') = v.doff
+           AND COALESCE(t.pickup,      '') = v.pup
+           AND COALESCE(t.program,     '') = v.prog
+           AND COALESCE(t.classroom,   '') = v.cls`,
+        ...params
+      );
     }
 
     return NextResponse.json({
-      updated,
+      combos: combos.length,
+      mapped,
       unmapped,
-      mapped: updated - unmapped,
-      message: `${updated} rows recomputed — ${updated - unmapped} classrooms mapped, ${unmapped} still unmapped`,
+      message: `${combos.length} combinations recomputed — ${mapped} classrooms mapped, ${unmapped} unmapped`,
     });
   } catch (err: any) {
     return NextResponse.json({ error: err.message ?? "Recompute failed" }, { status: 500 });
