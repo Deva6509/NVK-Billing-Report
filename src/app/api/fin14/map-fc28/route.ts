@@ -123,6 +123,7 @@ export async function POST(req: NextRequest) {
               "Contract Period 2 (FC28)":  s(fc28.contractPeriod2),
               "Copay Amt 2 (FC28)":        s(fc28.copayAmt2),
               "Copay Period 2 (FC28)":     s(fc28.copayPeriod2),
+              "Rate Card Key (FC28)":      s(fc28.rateCardKey),
             };
 
             valueParts.push(`($${pi}::text, $${pi + 1}::jsonb)`);
