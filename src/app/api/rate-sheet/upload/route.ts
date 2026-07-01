@@ -97,15 +97,10 @@ export async function POST(req: NextRequest) {
           const val      = str(v);
           if (val === null) continue; // skip empty pivot values
           const itemName = k.trim();
-          const rateCardKey = [
-            centerShort,
-            fixed.versionName ?? "",
-            to24h(fixed.dropOff),
-            to24h(fixed.pickUp),
-            fixed.program     ?? "",
-            itemName,
-          ].join("|");
-          dbRows.push({ ...fixed, itemName, itemValue: val, rateCardKey });
+          const rateCardKey        = [centerShort, fixed.versionName ?? "", to24h(fixed.dropOff), to24h(fixed.pickUp), fixed.program ?? "", itemName].join("|");
+          const earlyAMRateCardKey = [centerShort, fixed.versionName ?? "", "Early AM Care", itemName].join("|");
+          const latePMRateCardKey  = [centerShort, fixed.versionName ?? "", "Late PM Care",  itemName].join("|");
+          dbRows.push({ ...fixed, itemName, itemValue: val, rateCardKey, earlyAMRateCardKey, latePMRateCardKey });
         }
       }
     }

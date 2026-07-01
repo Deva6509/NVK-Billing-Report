@@ -10,17 +10,6 @@ function sse(data: object) {
   return enc.encode(`data: ${JSON.stringify(data)}\n\n`);
 }
 
-function to24h(t: string | null): string {
-  if (!t) return "";
-  const m = t.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)$/i);
-  if (!m) return t.trim();
-  let h = parseInt(m[1], 10);
-  const min = m[2], sec = m[3] ?? "00", ampm = m[4].toUpperCase();
-  if (ampm === "AM") { if (h === 12) h = 0; }
-  else               { if (h !== 12) h += 12; }
-  return `${String(h).padStart(2, "0")}:${min}:${sec}`;
-}
-
 function parseDate(s: any): Date | null {
   if (!s) return null;
   const str = String(s).trim();
@@ -29,87 +18,51 @@ function parseDate(s: any): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
-// Count Mon–Fri days between two dates inclusive
 function workingDays(start: Date, end: Date): number {
   let count = 0;
-  const d = new Date(start);
-  d.setHours(0, 0, 0, 0);
-  const e = new Date(end);
-  e.setHours(23, 59, 59, 999);
-  while (d <= e) {
-    const day = d.getDay();
-    if (day >= 1 && day <= 5) count++;
-    d.setDate(d.getDate() + 1);
-  }
+  const d = new Date(start); d.setHours(0, 0, 0, 0);
+  const e = new Date(end);   e.setHours(23, 59, 59, 999);
+  while (d <= e) { const day = d.getDay(); if (day >= 1 && day <= 5) count++; d.setDate(d.getDate() + 1); }
   return count;
 }
 
-// Count Mondays between two dates inclusive
 function mondaysCount(start: Date, end: Date): number {
   let count = 0;
-  const d = new Date(start);
-  d.setHours(0, 0, 0, 0);
-  const e = new Date(end);
-  e.setHours(23, 59, 59, 999);
-  while (d <= e) {
-    if (d.getDay() === 1) count++;
-    d.setDate(d.getDate() + 1);
-  }
+  const d = new Date(start); d.setHours(0, 0, 0, 0);
+  const e = new Date(end);   e.setHours(23, 59, 59, 999);
+  while (d <= e) { if (d.getDay() === 1) count++; d.setDate(d.getDate() + 1); }
   return count;
 }
 
-// Power Query Final Start Date logic (translated to TypeScript):
-// if startDate <= monthEnd AND (withdrawalDate = "N/A" OR withdrawalDate >= monthStart)
-//   → max(startDate, monthStart)
-// else → null (0)
 function finalStartDate(startStr: any, withdrawalStr: any, monthStart: Date, monthEnd: Date): Date | null {
   const startDate = parseDate(startStr);
   if (!startDate) return null;
-
   const startDay = new Date(startDate); startDay.setHours(0, 0, 0, 0);
   const mEnd     = new Date(monthEnd);  mEnd.setHours(23, 59, 59, 999);
   const mStart   = new Date(monthStart); mStart.setHours(0, 0, 0, 0);
-
   if (startDay > mEnd) return null;
-
   const withdrawalRaw = withdrawalStr ? String(withdrawalStr).trim() : "";
   const isNA = !withdrawalRaw || withdrawalRaw === "N/A";
-
-  if (isNA) {
-    return new Date(Math.max(startDay.getTime(), mStart.getTime()));
-  }
-
+  if (isNA) return new Date(Math.max(startDay.getTime(), mStart.getTime()));
   const withdrawalDate = parseDate(withdrawalStr);
   if (withdrawalDate) {
     const wDay = new Date(withdrawalDate); wDay.setHours(0, 0, 0, 0);
-    if (wDay >= mStart) {
-      return new Date(Math.max(startDay.getTime(), mStart.getTime()));
-    }
+    if (wDay >= mStart) return new Date(Math.max(startDay.getTime(), mStart.getTime()));
   }
   return null;
 }
 
-// Power Query Final End Date logic:
-// if fsd is valid AND withdrawalDate = "N/A" → monthEnd
-// if fsd is valid AND withdrawalDate >= monthStart → min(monthEnd, withdrawalDate)
-// else → monthEnd
 function finalEndDate(fsd: Date | null, withdrawalStr: any, monthStart: Date, monthEnd: Date): Date | null {
   if (!fsd) return null;
-
   const mEnd   = new Date(monthEnd);   mEnd.setHours(0, 0, 0, 0);
   const mStart = new Date(monthStart); mStart.setHours(0, 0, 0, 0);
-
   const withdrawalRaw = withdrawalStr ? String(withdrawalStr).trim() : "";
   const isNA = !withdrawalRaw || withdrawalRaw === "N/A";
-
   if (isNA) return mEnd;
-
   const withdrawalDate = parseDate(withdrawalStr);
   if (withdrawalDate) {
     const wDay = new Date(withdrawalDate); wDay.setHours(0, 0, 0, 0);
-    if (wDay >= mStart) {
-      return new Date(Math.min(mEnd.getTime(), wDay.getTime()));
-    }
+    if (wDay >= mStart) return new Date(Math.min(mEnd.getTime(), wDay.getTime()));
   }
   return mEnd;
 }
@@ -144,67 +97,61 @@ export async function POST(req: NextRequest) {
 
         controller.enqueue(sse({ phase: "init", message: `Month: ${monthStartDate} → ${monthEndDate} | Working days: ${totalDays} | Mondays: ${totalMondays}` }));
 
-        // 1. Load Rate Sheet for Early AM / Late PM lookups
+        // 1. Build rate maps from Rate Sheet new key columns (earlyAMRateCardKey / latePMRateCardKey)
         const latestBatch = await db.rateSheetBatch.findFirst({ orderBy: { uploadedAt: "desc" } });
-        const rateMap = new Map<string, string>(); // key → itemValue
+        const earlyAMMap = new Map<string, string>();
+        const latePMMap  = new Map<string, string>();
 
         if (latestBatch) {
-          const rateRows = await db.rateSheetRow.findMany({ where: { batchId: latestBatch.id } });
+          const rateRows: any[] = await prisma.$queryRawUnsafe(
+            `SELECT "earlyAMRateCardKey", "latePMRateCardKey", "itemValue" FROM "RateSheetRow" WHERE "batchId" = $1`,
+            latestBatch.id
+          );
           for (const r of rateRows) {
-            const centerShort = (r.center ?? "").split(",")[0].trim();
-            const key = [
-              centerShort,
-              r.versionName ?? "",
-              to24h(r.dropOff),
-              to24h(r.pickUp),
-              r.program    ?? "",
-              r.itemName   ?? "",
-            ].join("|");
-            rateMap.set(key, r.itemValue ?? "");
+            if (r.earlyAMRateCardKey && r.itemValue) earlyAMMap.set(r.earlyAMRateCardKey, r.itemValue);
+            if (r.latePMRateCardKey  && r.itemValue) latePMMap.set(r.latePMRateCardKey,   r.itemValue);
           }
         }
 
-        controller.enqueue(sse({ phase: "init", message: `Loaded ${rateMap.size} rate entries — processing FIN14 rows…` }));
+        controller.enqueue(sse({ phase: "init", message: `Loaded ${earlyAMMap.size} Early AM + ${latePMMap.size} Late PM rate entries — loading all FIN14 rows…` }));
 
-        // 3. Process all FIN14 rows in batches
-        const BATCH = 500;
-        const total: number = await db.fin14Row.count();
-        let processed = 0, updated = 0;
+        // 2. Load ALL rows in ONE query — eliminates 76 slow OFFSET-based SELECTs
+        const allRows: { id: number; rawData: Record<string, any> }[] = await prisma.$queryRawUnsafe(
+          `SELECT id, "rawData" FROM "Fin14Row" ORDER BY id`
+        );
+        const total = allRows.length;
 
-        for (let skip = 0; skip < total; skip += BATCH) {
-          const rows: any[] = await prisma.$queryRawUnsafe(
-            `SELECT id, "rawData" FROM "Fin14Row" ORDER BY id LIMIT ${BATCH} OFFSET ${skip}`
-          );
+        controller.enqueue(sse({ phase: "init", message: `Loaded ${total.toLocaleString()} rows — calculating…` }));
 
-          if (!rows.length) break;
+        // 3. Process all in JS, UPDATE in large batches (3000 rows = ~13 UPDATEs vs 76)
+        const UPDATE_BATCH = 3000;
+        let updated = 0;
 
+        for (let batchStart = 0; batchStart < total; batchStart += UPDATE_BATCH) {
+          const chunk = allRows.slice(batchStart, batchStart + UPDATE_BATCH);
           const valueParts: string[] = [];
           const params: any[] = [];
           let pi = 1;
 
-          for (const row of rows) {
-            const rd = (row.rawData ?? {}) as Record<string, any>;
+          for (const row of chunk) {
+            const rd = row.rawData;
 
             const startStr      = rd["Start Date (FC28)"]      ?? rd["Start Date"]      ?? "";
             const withdrawalStr = rd["Withdrawal Date (FC28)"] ?? rd["Withdrawal Date"] ?? "";
             const earlyAM       = String(rd["Early AM Care (FC28)"] ?? rd["Early AM Care"] ?? "").trim();
             const latePM        = String(rd["Late PM Care (FC28)"]  ?? rd["Late PM Care"]  ?? "").trim();
 
-            // Use pre-built keys from FC28 mapping (computed at upload time)
             const earlyAMKey = String(rd["Early AM Rate Card Key (FC28)"] ?? "").trim();
             const latePMKey  = String(rd["Late PM Rate Card Key (FC28)"]  ?? "").trim();
 
             const fsd = finalStartDate(startStr, withdrawalStr, monthStart, monthEnd);
             const fed = finalEndDate(fsd, withdrawalStr, monthStart, monthEnd);
 
-            // Early AM fee — use pre-built key directly
             const earlyAMFees = (earlyAM === "Yes" || earlyAM === "yes") && earlyAMKey
-              ? (rateMap.get(earlyAMKey) ?? "")
+              ? (earlyAMMap.get(earlyAMKey) ?? "")
               : "";
-
-            // Late PM fee — use pre-built key directly
             const latePMFees = (latePM === "Yes" || latePM === "yes") && latePMKey
-              ? (rateMap.get(latePMKey) ?? "")
+              ? (latePMMap.get(latePMKey) ?? "")
               : "";
 
             const patch: Record<string, any> = {
@@ -234,12 +181,12 @@ export async function POST(req: NextRequest) {
             );
           }
 
-          processed = Math.min(skip + BATCH, total);
+          const done = Math.min(batchStart + UPDATE_BATCH, total);
           controller.enqueue(sse({
             phase: "processing",
-            done: processed,
+            done,
             total,
-            pct: Math.round((processed / total) * 100),
+            pct: Math.round((done / total) * 100),
           }));
         }
 

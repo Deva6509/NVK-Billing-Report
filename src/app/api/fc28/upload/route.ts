@@ -110,8 +110,8 @@ export async function POST(req: NextRequest) {
         const pickup24  = to24h(pickup);
 
         const rateCardKey        = [centerShort, rateSheet ?? "", dropOff24, pickup24, program ?? "", effectiveClassroom].join("|");
-        const earlyAMRateCardKey = [centerShort, rateSheet ?? "", dropOff24, pickup24, "Early AM Care", effectiveClassroom].join("|");
-        const latePMRateCardKey  = [centerShort, rateSheet ?? "", dropOff24, pickup24, "Late PM Care",  effectiveClassroom].join("|");
+        const earlyAMRateCardKey = [centerShort, rateSheet ?? "", "Early AM Care", effectiveClassroom].join("|");
+        const latePMRateCardKey  = [centerShort, rateSheet ?? "", "Late PM Care",  effectiveClassroom].join("|");
 
         dbRows.push({
           batchId:         batchId ?? "__pending__",

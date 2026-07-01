@@ -59,9 +59,9 @@ export async function POST() {
       const rateSheet          = c.rateSheet;
       const program            = c.program;
 
-      const rateCardKey        = [centerShort, rateSheet, dropOff24, pickup24, program,          effectiveClassroom].join("|");
-      const earlyAMRateCardKey = [centerShort, rateSheet, dropOff24, pickup24, "Early AM Care",  effectiveClassroom].join("|");
-      const latePMRateCardKey  = [centerShort, rateSheet, dropOff24, pickup24, "Late PM Care",   effectiveClassroom].join("|");
+      const rateCardKey        = [centerShort, rateSheet, dropOff24, pickup24, program,         effectiveClassroom].join("|");
+      const earlyAMRateCardKey = [centerShort, rateSheet, "Early AM Care", effectiveClassroom].join("|");
+      const latePMRateCardKey  = [centerShort, rateSheet, "Late PM Care",  effectiveClassroom].join("|");
 
       revisedClassroom ? mapped++ : unmapped++;
 

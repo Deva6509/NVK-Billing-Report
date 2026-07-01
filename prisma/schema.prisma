@@ -810,8 +810,8 @@ model FC28Row {
   copayPeriod2     String?
   rateCardKey         String?   // CenterShort|RateSheet|DropOff(24h)|Pickup(24h)|Program|RevisedClassroom
   revisedClassroom    String?   // Classroom mapped via ClassroomMapping (null = not yet mapped)
-  earlyAMRateCardKey  String?   // Same as rateCardKey with Program = "Early AM Care"
-  latePMRateCardKey   String?   // Same as rateCardKey with Program = "Late PM Care"
+  earlyAMRateCardKey  String?   // CenterShort|RateSheet|Early AM Care|RevisedClassroom  (no DropOff/Pickup)
+  latePMRateCardKey   String?   // CenterShort|RateSheet|Late PM Care|RevisedClassroom   (no DropOff/Pickup)
   createdAt           DateTime  @default(now())
 
   @@index([batchId])
@@ -844,15 +844,19 @@ model RateSheetRow {
   dropOff     String?
   pickUp      String?
   program     String?
-  itemName    String?
-  itemValue   String?
-  rateCardKey String?        // Center(before comma)|VersionName|DropOff|PickUp|Program|ItemName
-  createdAt   DateTime       @default(now())
+  itemName           String?
+  itemValue          String?
+  rateCardKey        String?   // Center(before comma)|VersionName|DropOff|PickUp|Program|ItemName
+  earlyAMRateCardKey String?   // Center(before comma)|VersionName|Early AM Care|ItemName
+  latePMRateCardKey  String?   // Center(before comma)|VersionName|Late PM Care|ItemName
+  createdAt          DateTime  @default(now())
 
   @@index([batchId])
   @@index([center])
   @@index([itemName])
   @@index([rateCardKey])
+  @@index([earlyAMRateCardKey])
+  @@index([latePMRateCardKey])
 }
 
 // ─── Classroom Mapping (FC28 classroom → Rate Sheet item name) ───────────────
