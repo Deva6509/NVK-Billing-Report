@@ -57,6 +57,7 @@ export const FC28_COLUMNS = [
   { key: "contractPeriod2", label: "Contract Period 2" },
   { key: "copayAmt2",       label: "Copay Amount 2" },
   { key: "copayPeriod2",    label: "Copay Period 2" },
+  { key: "rateCardKey",     label: "Rate Card Key" },
   { key: "sourceFile",      label: "Source File" },
 ];
 

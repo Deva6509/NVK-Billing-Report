@@ -54,10 +54,11 @@ const ALL_COLS = [
   { key: "contractPeriod2",  label: "Contract Period 2",     group: "Billing 2" },
   { key: "copayAmt2",        label: "Copay Amount 2",        group: "Billing 2" },
   { key: "copayPeriod2",     label: "Copay Period 2",        group: "Billing 2" },
+  { key: "rateCardKey",      label: "Rate Card Key",         group: "Meta" },
   { key: "sourceFile",       label: "Source File",           group: "Meta" },
 ];
 const GROUPS = Array.from(new Set(ALL_COLS.map(c => c.group)));
-const DEFAULT_KEYS = ["center","centerId","childId","childName","familyName","familyId",
+const DEFAULT_KEYS = ["rateCardKey","center","centerId","childId","childName","familyName","familyId",
   "childStatus","familyStatus","classroom","rateSheet","startDate","withdrawalDate",
   "billingCycle","agency1","contractAmt1","contractPeriod1","program","dateOfBirth"];
 const GROUP_COLORS: Record<string, string> = {
