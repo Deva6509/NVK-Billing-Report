@@ -142,17 +142,23 @@ function UploadModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
   const upload = async () => {
     if (!files.length) return;
     setState("processing");
-    setMsg("Parsing files…");
+    setMsg("Parsing files in parallel…");
     try {
-      const XLSX = await import("xlsx");
-      let headerKeys: string[] = [];
-      const allRows: Record<string, any>[] = [];
+      // 1. Import xlsx once, parse ALL files simultaneously
+      const xlsxMod = await import("xlsx");
+      const XLSX = (xlsxMod as any).default ?? xlsxMod;
 
-      for (const file of files) {
+      const parsedFiles = await Promise.all(files.map(async (file) => {
         const buffer = await file.arrayBuffer();
         const wb = XLSX.read(buffer, { type: "buffer", cellDates: true });
         const ws = wb.Sheets[wb.SheetNames[0]];
-        const rows = XLSX.utils.sheet_to_json(ws, { defval: null }) as Record<string, any>[];
+        return XLSX.utils.sheet_to_json(ws, { defval: null }) as Record<string, any>[];
+      }));
+
+      // 2. Flatten and de-dup header/empty rows
+      let headerKeys: string[] = [];
+      const allRows: Record<string, any>[] = [];
+      for (const rows of parsedFiles) {
         if (!rows.length) continue;
         if (!headerKeys.length) headerKeys = Object.keys(rows[0]);
         for (const row of rows) {
@@ -167,30 +173,51 @@ function UploadModal({ onClose, onDone }: { onClose: () => void; onDone: () => v
       }
 
       if (!allRows.length) throw new Error("No data rows found in the uploaded files");
+      setMsg(`Parsed ${allRows.length.toLocaleString()} rows — clearing previous data…`);
 
-      // Step 1: delete all existing FIN14 data
-      setMsg("Clearing previous FIN14 data…");
+      // 3. Delete all existing FIN14 data
       const delRes = await fetch("/api/fin14", { method: "DELETE" });
       if (!delRes.ok) throw new Error("Failed to clear existing data");
 
-      // Step 2: upload in 3000-row chunks
-      setMsg(`Uploading ${allRows.length.toLocaleString()} rows…`);
+      // 4. First chunk creates the batch (need batchId before parallel sends)
       const CHUNK = 3000;
-      let batchId = "";
-      for (let i = 0; i < allRows.length; i += CHUNK) {
-        const chunk   = allRows.slice(i, i + CHUNK);
-        const isFinal = i + CHUNK >= allRows.length;
-        const res = await fetch("/api/upload/consolidate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ rows: chunk, fileCount: i === 0 ? files.length : 0, batchId: batchId || undefined, isFinal }),
-        });
-        if (!res.ok) { const j = await res.json().catch(() => ({})); throw new Error(j.message ?? "Upload failed"); }
-        const d = await res.json();
-        if (!batchId) batchId = d.batchId;
-        if (isFinal) setMsg(`Done — ${(d.rowCount ?? allRows.length).toLocaleString()} rows saved`);
+      setMsg(`Uploading ${allRows.length.toLocaleString()} rows…`);
+
+      const firstChunk  = allRows.slice(0, CHUNK);
+      const isSingleChunk = allRows.length <= CHUNK;
+      const firstRes = await fetch("/api/upload/consolidate", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ rows: firstChunk, fileCount: files.length, isFinal: isSingleChunk }),
+      });
+      if (!firstRes.ok) { const j = await firstRes.json().catch(() => ({})); throw new Error(j.message ?? "Upload failed"); }
+      const firstData = await firstRes.json();
+      const batchId   = firstData.batchId as string;
+
+      if (!isSingleChunk) {
+        // 5. Send remaining chunks 3 at a time concurrently
+        const CONCURRENCY = 3;
+        const chunks: Record<string, any>[][] = [];
+        for (let i = CHUNK; i < allRows.length; i += CHUNK) chunks.push(allRows.slice(i, i + CHUNK));
+
+        for (let i = 0; i < chunks.length; i += CONCURRENCY) {
+          const wave   = chunks.slice(i, i + CONCURRENCY);
+          const isLast = i + CONCURRENCY >= chunks.length;
+          const results = await Promise.all(wave.map((chunk, wi) => {
+            const isFinal = isLast && wi === wave.length - 1;
+            return fetch("/api/upload/consolidate", {
+              method: "POST", headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ rows: chunk, fileCount: 0, batchId, isFinal }),
+            });
+          }));
+          for (const r of results) {
+            if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.message ?? "Upload failed"); }
+          }
+          const pct = Math.round(Math.min(((i + CONCURRENCY) * CHUNK + CHUNK) / allRows.length * 100, 99));
+          setMsg(`Uploading… ${pct}%`);
+        }
       }
 
+      setMsg(`Done — ${allRows.length.toLocaleString()} rows saved`);
       setState("done");
     } catch (e: any) {
       setState("error");

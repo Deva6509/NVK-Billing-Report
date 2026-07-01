@@ -118,36 +118,68 @@ export default function FC28Page() {
   const upload = async () => {
     if (!files.length || !reportDate) return;
     setUploading(true);
-    setUploadLog([`Uploading ${files.length} file(s) for ${reportDate}…`]);
+    setUploadLog([`Parsing ${files.length} files in parallel…`]);
     try {
-      let batchId: string | undefined;
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        setUploadLog(prev => [...prev, `Parsing ${file.name}…`]);
-        const xlsxMod = await import("xlsx");
-        const XLSX = (xlsxMod as any).default ?? xlsxMod;
+      // 1. Import xlsx once, then parse ALL files simultaneously
+      const xlsxMod = await import("xlsx");
+      const XLSX = (xlsxMod as any).default ?? xlsxMod;
+
+      const parsed = await Promise.all(files.map(async (file) => {
         const buf  = await file.arrayBuffer();
         const wb   = XLSX.read(buf, { type: "array", raw: true });
         const ws   = wb.Sheets[wb.SheetNames[0]];
         const rows = XLSX.utils.sheet_to_json(ws, { defval: null }) as Record<string, any>[];
-        if (!rows.length) { setUploadLog(prev => [...prev, `  ⚠ No rows, skipped`]); continue; }
-        setUploadLog(prev => [...prev, `  Sending ${rows.length.toLocaleString()} rows…`]);
-        const isFinal = i === files.length - 1;
-        const res = await fetch("/api/fc28/upload", {
-          method:"POST", headers:{"Content-Type":"application/json"},
-          body: JSON.stringify({ reportDate, batchId, isFinal, files:[{ name: file.name, rows }] }),
-        });
-        if (!res.ok) { const e = await res.json().catch(()=>({})); throw new Error(e.error ?? "Upload failed"); }
-        const j = await res.json();
-        batchId = j.batchId;
-        setUploadLog(prev => [...prev, `  ✓ Done`]);
-        if (isFinal) {
-          setUploadLog(prev => [...prev, ``, `✅ ${j.rowCount?.toLocaleString()} rows · ${j.fileCount} files uploaded`]);
-          setDlBatchId(batchId!);
-          setFiles([]);
-          await loadBatches();
-        }
+        return { name: file.name, rows };
+      }));
+
+      const valid      = parsed.filter(f => f.rows.length > 0);
+      const totalRows  = valid.reduce((s, f) => s + f.rows.length, 0);
+      setUploadLog(prev => [...prev, `Parsed ${valid.length} files (${totalRows.toLocaleString()} rows) — sending to server…`]);
+
+      // 2. Group ~7 files per API call (~3 MB each, under Vercel's 4.5 MB limit)
+      const GROUP = 7;
+      const groups: typeof valid[] = [];
+      for (let i = 0; i < valid.length; i += GROUP) groups.push(valid.slice(i, i + GROUP));
+
+      // 3. First group creates the batch (need batchId before parallel sends)
+      const firstBody = JSON.stringify({ reportDate, isFinal: groups.length === 1, files: groups[0] });
+      const firstRes  = await fetch("/api/fc28/upload", { method: "POST", headers: { "Content-Type": "application/json" }, body: firstBody });
+      if (!firstRes.ok) { const e = await firstRes.json().catch(() => ({})); throw new Error(e.error ?? "Upload failed"); }
+      const firstData = await firstRes.json();
+      const batchId   = firstData.batchId as string;
+      setUploadLog(prev => [...prev, `  Group 1/${groups.length} done`]);
+
+      // 4. Send remaining groups 3 at a time concurrently
+      const CONCURRENCY = 3;
+      const rest = groups.slice(1);
+      for (let i = 0; i < rest.length; i += CONCURRENCY) {
+        const wave     = rest.slice(i, i + CONCURRENCY);
+        const isLast   = i + CONCURRENCY >= rest.length;
+        await Promise.all(wave.map((group, wi) => {
+          const isFinal = isLast && wi === wave.length - 1;
+          return fetch("/api/fc28/upload", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ reportDate, batchId, isFinal, files: group }),
+          });
+        }));
+        setUploadLog(prev => [...prev, `  Groups ${i + 2}–${Math.min(i + 2 + CONCURRENCY - 1, groups.length)}/${groups.length} done`]);
       }
+
+      // 5. If only 1 group, stats were already computed; else fetch final count
+      let rowCount = firstData.rowCount;
+      if (groups.length > 1) {
+        const statsRes = await fetch("/api/fc28/upload", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ reportDate, batchId, isFinal: true, files: [] }),
+        });
+        const stats = await statsRes.json().catch(() => ({}));
+        rowCount = stats.rowCount ?? totalRows;
+      }
+
+      setUploadLog(prev => [...prev, ``, `✅ ${(rowCount ?? totalRows).toLocaleString()} rows · ${valid.length} files uploaded`]);
+      setDlBatchId(batchId);
+      setFiles([]);
+      await loadBatches();
     } catch (err: any) {
       setUploadLog(prev => [...prev, `✗ ${err.message}`]);
     } finally { setUploading(false); }
