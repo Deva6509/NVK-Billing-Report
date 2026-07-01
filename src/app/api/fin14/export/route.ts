@@ -1,10 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
-import * as XLSX from "xlsx";
 
-export const maxDuration = 60;
-
-const db = prisma as any;
+export const maxDuration = 300;
 
 function computeEntryBy(itemText: string | null, subHead: string | null): string {
   if (subHead === "Adjustments" && itemText) {
@@ -14,40 +11,52 @@ function computeEntryBy(itemText: string | null, subHead: string | null): string
   return "CENTER";
 }
 
-// GET /api/fin14/export — downloads all visible FIN14 rows as Excel
-// Columns match exactly what is shown on screen (union of all rawData keys + system cols)
+// GET /api/fin14/export
+// Uses raw SQL to avoid Prisma ORM overhead on 38k+ JSONB rows.
+// Step 1: one SQL pass to collect distinct rawData keys (PostgreSQL jsonb_object_keys).
+// Step 2: fetch only the 6 needed columns instead of the full model.
 export async function GET(req: NextRequest) {
   try {
     const sp = new URL(req.url).searchParams;
-    const where: any = {};
     const isMatched  = sp.get("isMatched");
     const majorHead  = sp.get("majorHead");
     const subHead    = sp.get("subHead");
     const itemSearch = sp.get("itemSearch");
-    if (isMatched === "true")  where.isMatched = true;
-    if (isMatched === "false") where.isMatched = false;
-    if (majorHead)             where.majorHead = majorHead;
-    if (subHead)               where.subHead   = subHead;
-    if (itemSearch)            where.itemText  = { contains: itemSearch, mode: "insensitive" };
 
-    const rows = await db.fin14Row.findMany({ where, orderBy: { id: "asc" } });
+    // Build parameterised WHERE clause
+    const conditions: string[] = [];
+    const params: any[] = [];
+    let pi = 1;
+    if (isMatched === "true")  conditions.push(`"isMatched" = true`);
+    if (isMatched === "false") conditions.push(`"isMatched" = false`);
+    if (majorHead)  { conditions.push(`"majorHead" = $${pi++}`);            params.push(majorHead); }
+    if (subHead)    { conditions.push(`"subHead"   = $${pi++}`);            params.push(subHead); }
+    if (itemSearch) { conditions.push(`"itemText" ILIKE $${pi++}`);         params.push(`%${itemSearch}%`); }
+    const where = conditions.length ? `WHERE ${conditions.join(" AND ")}` : "";
+
+    // 1. Collect distinct rawData keys in one DB-side pass
+    const keyRows: { key: string }[] = await prisma.$queryRawUnsafe(
+      `SELECT DISTINCT jsonb_object_keys("rawData") AS key FROM "Fin14Row" ${where}`,
+      ...params
+    );
+    const rawCols = keyRows.map((r) => r.key);
+
+    // 2. Fetch only the columns we need
+    const rows: any[] = await prisma.$queryRawUnsafe(
+      `SELECT "rawData","majorHead","subHead","isMatched","entryBy","itemText"
+         FROM "Fin14Row" ${where} ORDER BY id`,
+      ...params
+    );
+
     if (!rows.length) return NextResponse.json({ error: "No rows to export" }, { status: 404 });
 
-    // Build union of ALL rawData keys across every row (same logic as on-screen table)
-    const rawColSet = new Set<string>();
-    for (const r of rows) {
-      if (r.rawData && typeof r.rawData === "object") {
-        for (const k of Object.keys(r.rawData)) rawColSet.add(k);
-      }
-    }
-    const rawCols = Array.from(rawColSet);
+    // 3. Build sheet data
     const headers = [...rawCols, "Major Head", "Sub Head", "Entry By", "Matched By", "Status"];
-
     const data: any[][] = [headers];
     for (const row of rows) {
       const rd = (row.rawData ?? {}) as Record<string, any>;
       data.push([
-        ...rawCols.map((c) => { const v = rd[c]; return v === null || v === undefined ? "" : String(v); }),
+        ...rawCols.map((c) => { const v = rd[c]; return v == null ? "" : String(v); }),
         row.majorHead ?? "",
         row.subHead   ?? "",
         row.isMatched ? computeEntryBy(row.itemText, row.subHead) : "",
@@ -56,9 +65,11 @@ export async function GET(req: NextRequest) {
       ]);
     }
 
+    // 4. Generate Excel (dynamic import avoids cold-start cost)
+    const xlsxMod = await import("xlsx");
+    const XLSX = (xlsxMod as any).default ?? xlsxMod;
     const ws = XLSX.utils.aoa_to_sheet(data);
     ws["!freeze"] = { xSplit: 0, ySplit: 1 };
-
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, ws, "FIN14 Transactions");
     const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
