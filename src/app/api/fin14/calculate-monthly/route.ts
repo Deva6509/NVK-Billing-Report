@@ -72,6 +72,30 @@ function fmtDate(d: Date | null): string {
   return d.toISOString().slice(0, 10);
 }
 
+// Count Mon–Fri days between two dates inclusive
+function countWorkingDays(start: Date, end: Date): number {
+  let count = 0;
+  const d = new Date(start); d.setHours(0, 0, 0, 0);
+  const e = new Date(end);   e.setHours(23, 59, 59, 999);
+  while (d <= e) { const day = d.getDay(); if (day >= 1 && day <= 5) count++; d.setDate(d.getDate() + 1); }
+  return count;
+}
+
+// Count Mondays between two dates inclusive
+function countMondays(start: Date, end: Date): number {
+  let count = 0;
+  const d = new Date(start); d.setHours(0, 0, 0, 0);
+  const e = new Date(end);   e.setHours(23, 59, 59, 999);
+  while (d <= e) { if (d.getDay() === 1) count++; d.setDate(d.getDate() + 1); }
+  return count;
+}
+
+function toNum(v: any): number {
+  if (!v && v !== 0) return 0;
+  const n = parseFloat(String(v).replace(/[^0-9.-]/g, ""));
+  return isNaN(n) ? 0 : n;
+}
+
 // POST /api/fin14/calculate-monthly
 // Body: { monthStartDate: "2026-06-01", monthEndDate: "2026-06-30" }
 export async function POST(req: NextRequest) {
@@ -154,15 +178,49 @@ export async function POST(req: NextRequest) {
               ? (latePMMap.get(latePMKey) ?? "")
               : "";
 
+            // Final Days to be Billed:
+            // if Date.From(Start Date) = Final End Date → 0
+            // else if Final Start Date valid → count working days (Mon–Fri) between fsd and fed
+            // else → 0
+            const originalStart = parseDate(startStr);
+            const fedDay = fed ? new Date(fed) : null; if (fedDay) fedDay.setHours(0,0,0,0);
+            const origStartDay = originalStart ? new Date(originalStart) : null; if (origStartDay) origStartDay.setHours(0,0,0,0);
+            const startEqualsEnd = origStartDay && fedDay && origStartDay.getTime() === fedDay.getTime();
+            const finalDaysToBill = startEqualsEnd
+              ? 0
+              : fsd && fed ? countWorkingDays(fsd, fed) : 0;
+
+            // Final Weeks to be Billed:
+            // if Final Start Date = Final End Date → 0
+            // else if Final Start Date valid → count Mondays between fsd and fed
+            // else → 0
+            const fsdDay = fsd ? new Date(fsd) : null; if (fsdDay) fsdDay.setHours(0,0,0,0);
+            const fsdEqualsFed = fsdDay && fedDay && fsdDay.getTime() === fedDay.getTime();
+            const finalWeeksToBill = fsdEqualsFed
+              ? 0
+              : fsd && fed ? countMondays(fsd, fed) : 0;
+
+            // Gross Billing Amount = Monthly fees (Item Value from Rate Sheet) + Early AM Fees + Late PM Fees
+            const monthlyFees = rd["Item Value (Rate Sheet)"] ?? "";
+            const grossBilling = toNum(monthlyFees) + toNum(earlyAMFees) + toNum(latePMFees);
+
+            // Agency Type: "Private" if Agency 1 is blank/null, else "Agency"
+            const agency = String(rd["Agency 1 (FC28)"] ?? rd["Agency"] ?? "").trim();
+            const agencyType = agency === "" ? "Private" : "Agency";
+
             const patch: Record<string, any> = {
-              "Month Start Date":       monthStartDate,
-              "Month End Date":         monthEndDate,
-              "Total Days in Month":    totalDays,
-              "Total Mondays in Month": totalMondays,
-              "Final Start Date":       fsd ? fmtDate(fsd) : "",
-              "Final End Date":         fed ? fmtDate(fed) : "",
-              "Early AM Care Fees":     earlyAMFees,
-              "Late PM Care Fees":      latePMFees,
+              "Month Start Date":              monthStartDate,
+              "Month End Date":                monthEndDate,
+              "Total Days in Month":           totalDays,
+              "Total Mondays in Month":        totalMondays,
+              "Final Start Date":              fsd ? fmtDate(fsd) : "",
+              "Final End Date":                fed ? fmtDate(fed) : "",
+              "Early AM Care Fees":            earlyAMFees,
+              "Late PM Care Fees":             latePMFees,
+              "Final Days to be Billed":       finalDaysToBill,
+              "Final Weeks to be Billed":      finalWeeksToBill,
+              "Gross Billing Amount":          grossBilling === 0 ? "" : grossBilling,
+              "Agency Type":                   agencyType,
             };
 
             valueParts.push(`($${pi}::int, $${pi + 1}::jsonb)`);

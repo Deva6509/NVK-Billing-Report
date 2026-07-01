@@ -37,7 +37,9 @@ const CALC_COLS = [
   "Month Start Date", "Month End Date",
   "Total Days in Month", "Total Mondays in Month",
   "Final Start Date", "Final End Date",
+  "Final Days to be Billed", "Final Weeks to be Billed",
   "Early AM Care Fees", "Late PM Care Fees",
+  "Gross Billing Amount", "Agency Type",
 ];
 
 // GET /api/fin14/export
