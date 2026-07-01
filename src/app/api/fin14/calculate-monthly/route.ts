@@ -209,7 +209,7 @@ export async function POST(req: NextRequest) {
               if (parts.length === 6) {
                 const fc28Classroom   = parts[5];
                 const mappedClassroom = classroomMap.get(fc28Classroom) ?? fc28Classroom;
-                const lookupKey = [...parts.slice(0, 4), "EARLY AM CARE", mappedClassroom].join("|");
+                const lookupKey = [...parts.slice(0, 4), "Early AM Care", mappedClassroom].join("|");
                 earlyAMFees = rateMap.get(lookupKey) ?? "";
               }
             }
