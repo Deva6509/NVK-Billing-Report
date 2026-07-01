@@ -74,19 +74,27 @@ export async function POST(req: NextRequest) {
         const cop1  = keys.find(k => k === "Copay Period");
         const cop2  = keys.find(k => k === "Copay Period_1");
 
+        const center    = strVal(row["Center"]);
+        const rateSheet = strVal(row["Rate Sheet"]);
+        const dropOff   = strVal(row["Drop Off"]);
+        const pickup    = strVal(row["Pickup"]);
+        const program   = strVal(row["Program"]);
+        const classroom = strVal(row["Classroom"]);
+        const rateCardKey = [center ?? "", rateSheet ?? "", dropOff ?? "", pickup ?? "", program ?? "", classroom ?? ""].join("|");
+
         dbRows.push({
           batchId:         batchId ?? "__pending__",
           sourceFile:      file.name,
-          center:          strVal(row["Center"]),
+          center,
           centerId:        strVal(row["Center ID"]),
           familyName:      strVal(row["Family Name"]),
           familyId:        strVal(row["Family ID"]),
           childStatus:     strVal(row["Child Status"]),
           familyStatus:    strVal(row["Family Status"]),
-          classroom:       strVal(row["Classroom"]),
+          classroom,
           childName:       strVal(row["Child Name"]),
           childId:         strVal(row["Child ID"]),
-          rateSheet:       strVal(row["Rate Sheet"]),
+          rateSheet,
           dateOfBirth:     strVal(row["Date of Birth"]),
           enrollDate:      strVal(row["Enroll Date"]),
           startDate:       strVal(row["Start Date"]),
@@ -103,9 +111,9 @@ export async function POST(req: NextRequest) {
           city:            strVal(row["City"]),
           state:           strVal(row["State"]),
           zipCode:         strVal(row["Zip Code"]),
-          program:         strVal(row["Program"]),
-          dropOff:         strVal(row["Drop Off"]),
-          pickup:          strVal(row["Pickup"]),
+          program,
+          dropOff,
+          pickup,
           earlyAMCare:     strVal(row["Early AM Care"]),
           latePMCare:      strVal(row["Late PM Care"]),
           discountType:    strVal(row["Discount Type"]),
@@ -126,6 +134,7 @@ export async function POST(req: NextRequest) {
           contractPeriod2: cp2    ? strVal(row[cp2])    : null,
           copayAmt2:       coa2   ? strVal(row[coa2])   : null,
           copayPeriod2:    cop2   ? strVal(row[cop2])   : null,
+          rateCardKey,
         });
       }
     }

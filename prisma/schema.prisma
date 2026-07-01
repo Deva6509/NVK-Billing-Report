@@ -808,11 +808,13 @@ model FC28Row {
   contractPeriod2  String?
   copayAmt2        String?
   copayPeriod2     String?
+  rateCardKey      String?   // Center|RateSheet|DropOff|Pickup|Program|Classroom
   createdAt        DateTime  @default(now())
 
   @@index([batchId])
   @@index([childId])
   @@index([center])
+  @@index([rateCardKey])
 }
 
 // ─── Rate Sheet Upload (center-wise, unpivoted) ──────────────────────────────
