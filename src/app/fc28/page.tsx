@@ -137,34 +137,37 @@ export default function FC28Page() {
       if (!valid.length) throw new Error("No data rows found in any file");
       setUploadLog(prev => [...prev, `Parsed ${valid.length} files — sending to server…`]);
 
-      // 2. Group ~7 files per API call (~3 MB each, under Vercel 4.5 MB limit)
-      const GROUP = 7;
-      const groups: typeof valid[] = [];
-      for (let i = 0; i < valid.length; i += GROUP) groups.push(valid.slice(i, i + GROUP));
-
-      // 3. First request creates the batch — always isFinal:false so batchId is returned cleanly
+      // 2. First request creates the batch (1 file, isFinal:false) → gets batchId
       const firstRes = await fetch("/api/fc28/upload", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reportDate, isFinal: false, files: groups[0] }),
+        body: JSON.stringify({ reportDate, isFinal: false, files: [valid[0]] }),
       });
-      if (!firstRes.ok) { const e = await firstRes.json().catch(() => ({})); throw new Error(e.error ?? "Upload failed"); }
+      if (!firstRes.ok) {
+        const e = await firstRes.text().catch(() => "");
+        throw new Error(`Upload failed (${firstRes.status}): ${e || firstRes.statusText}`);
+      }
       const { batchId } = await firstRes.json();
-      setUploadLog(prev => [...prev, `  Group 1/${groups.length} uploaded…`]);
+      setUploadLog(prev => [...prev, `  File 1/${valid.length} uploaded…`]);
 
-      // 4. Send remaining groups 3 at a time — all isFinal:false, check every response
-      const CONCURRENCY = 3;
-      for (let i = 1; i < groups.length; i += CONCURRENCY) {
-        const wave    = groups.slice(i, i + CONCURRENCY);
-        const results = await Promise.all(wave.map(group =>
+      // 3. Send remaining files 5 at a time — each file is its own request, all isFinal:false
+      const CONCURRENCY = 5;
+      let done = 1;
+      for (let i = 1; i < valid.length; i += CONCURRENCY) {
+        const wave = valid.slice(i, i + CONCURRENCY);
+        const results = await Promise.all(wave.map(file =>
           fetch("/api/fc28/upload", {
             method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ reportDate, batchId, isFinal: false, files: group }),
+            body: JSON.stringify({ reportDate, batchId, isFinal: false, files: [file] }),
           })
         ));
         for (const r of results) {
-          if (!r.ok) { const e = await r.json().catch(() => ({})); throw new Error(e.error ?? "Upload failed on a group"); }
+          if (!r.ok) {
+            const e = await r.text().catch(() => "");
+            throw new Error(`Upload failed (${r.status}): ${e || r.statusText}`);
+          }
         }
-        setUploadLog(prev => [...prev, `  Groups ${i + 1}–${Math.min(i + CONCURRENCY, groups.length)} of ${groups.length} done`]);
+        done = Math.min(i + CONCURRENCY, valid.length);
+        setUploadLog(prev => [...prev, `  Files ${done}/${valid.length} uploaded…`]);
       }
 
       // 5. Single finalize request — counts real rows from DB and updates batch stats
