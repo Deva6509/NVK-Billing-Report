@@ -40,6 +40,7 @@ const CALC_COLS = [
   "Final Days to be Billed", "Final Weeks to be Billed",
   "Early AM Care Fees", "Late PM Care Fees",
   "Gross Billing Amount", "Agency Type",
+  "Final Billing Amount", "Final Agency Billing", "Estimated Copay Billing",
 ];
 
 // GET /api/fin14/export

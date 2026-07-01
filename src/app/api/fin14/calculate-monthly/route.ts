@@ -96,6 +96,63 @@ function toNum(v: any): number {
   return isNaN(n) ? 0 : n;
 }
 
+function fmt2(n: number): number {
+  return Math.round(n * 100) / 100;
+}
+
+// Final Billing Amount
+// If (Billing Cycle="Monthly" AND finalDays=totalDays) OR (Billing Cycle="Weekly" AND finalWeeks=totalMondays)
+//   → fullGross; else → fullGross * finalDays / totalDays
+function calcFinalBilling(
+  billingCycle: string, finalDays: number, finalWeeks: number,
+  totalDays: number, totalMondays: number, grossBilling: number
+): number {
+  const full = (billingCycle === "Monthly" && finalDays === totalDays) ||
+               (billingCycle === "Weekly"  && finalWeeks === totalMondays);
+  if (full) return fmt2(grossBilling);
+  if (totalDays === 0) return 0;
+  return fmt2(grossBilling * finalDays / totalDays);
+}
+
+// Final Agency Billing
+// If Contract Amt or Contract Period is blank/"N/A" → 0
+// "Day"   → amt * 21.65 / totalDays * finalDays
+// "Week"  → amt * finalWeeks / 4.33
+// "Month" → amt
+function calcAgencyBilling(
+  contractAmt: any, contractPeriod: any,
+  totalDays: number, finalDays: number, finalWeeks: number
+): number {
+  const amt    = String(contractAmt    ?? "").trim();
+  const period = String(contractPeriod ?? "").trim();
+  if (!amt || amt === "N/A" || !period || period === "N/A") return 0;
+  const n = toNum(amt);
+  if (period === "Day")   return fmt2(n * 21.65 / totalDays * finalDays);
+  if (period === "Week")  return fmt2(n * finalWeeks / 4.33);
+  if (period === "Month") return fmt2(n);
+  return 0;
+}
+
+// Estimated Copay Billing
+// If Copay Amt blank/"N/A" → finalBilling - agencyBilling
+// "Day"   → amt * 21.65 / totalDays * finalDays
+// "Week"  → amt * finalWeeks / 4.33
+// "Month" → amt
+function calcCopayBilling(
+  copayAmt: any, copayPeriod: any,
+  finalBilling: number, agencyBilling: number,
+  totalDays: number, finalDays: number, finalWeeks: number
+): number {
+  const amt    = String(copayAmt    ?? "").trim();
+  const period = String(copayPeriod ?? "").trim();
+  if (!amt || amt === "N/A") return fmt2(finalBilling - agencyBilling);
+  const n = toNum(amt);
+  if (period === "Day")   return fmt2(n * 21.65 / totalDays * finalDays);
+  if (period === "Week")  return fmt2(n * finalWeeks / 4.33);
+  if (period === "Month") return fmt2(n);
+  return 0;
+}
+
 // POST /api/fin14/calculate-monthly
 // Body: { monthStartDate: "2026-06-01", monthEndDate: "2026-06-30" }
 export async function POST(req: NextRequest) {
@@ -208,6 +265,23 @@ export async function POST(req: NextRequest) {
             const agency = String(rd["Agency 1 (FC28)"] ?? rd["Agency"] ?? "").trim();
             const agencyType = agency === "" ? "Private" : "Agency";
 
+            // Final Billing Amount
+            const billingCycle = String(rd["Billing Cycle (FC28)"] ?? "").trim();
+            const finalBilling = calcFinalBilling(billingCycle, finalDaysToBill, finalWeeksToBill, totalDays, totalMondays, grossBilling);
+
+            // Final Agency Billing
+            const agencyBilling = calcAgencyBilling(
+              rd["Contract Amt 1 (FC28)"], rd["Contract Period 1 (FC28)"],
+              totalDays, finalDaysToBill, finalWeeksToBill
+            );
+
+            // Estimated Copay Billing
+            const copayBilling = calcCopayBilling(
+              rd["Copay Amt 1 (FC28)"], rd["Copay Period 1 (FC28)"],
+              finalBilling, agencyBilling,
+              totalDays, finalDaysToBill, finalWeeksToBill
+            );
+
             const patch: Record<string, any> = {
               "Month Start Date":              monthStartDate,
               "Month End Date":                monthEndDate,
@@ -221,6 +295,9 @@ export async function POST(req: NextRequest) {
               "Final Weeks to be Billed":      finalWeeksToBill,
               "Gross Billing Amount":          grossBilling === 0 ? "" : grossBilling,
               "Agency Type":                   agencyType,
+              "Final Billing Amount":          finalBilling === 0 ? "" : finalBilling,
+              "Final Agency Billing":          agencyBilling === 0 ? "" : agencyBilling,
+              "Estimated Copay Billing":       copayBilling === 0 ? "" : copayBilling,
             };
 
             valueParts.push(`($${pi}::int, $${pi + 1}::jsonb)`);
