@@ -17,6 +17,17 @@ function strVal(v: any): string | null {
   return s === "" || s === "N/A" ? null : s;
 }
 
+function to24h(t: string | null): string {
+  if (!t) return "";
+  const m = t.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)$/i);
+  if (!m) return t.trim();
+  let h = parseInt(m[1], 10);
+  const min = m[2], sec = m[3] ?? "00", ampm = m[4].toUpperCase();
+  if (ampm === "AM") { if (h === 12) h = 0; }
+  else               { if (h !== 12) h += 12; }
+  return `${String(h).padStart(2, "0")}:${min}:${sec}`;
+}
+
 // POST /api/fc28/upload
 // Body: { reportDate, batchId?, isFinal?, files: [{ name, rows[] }] }
 // - First call (no batchId): creates FC28Batch, inserts rows, returns { batchId }
@@ -80,7 +91,7 @@ export async function POST(req: NextRequest) {
         const pickup    = strVal(row["Pickup"]);
         const program   = strVal(row["Program"]);
         const classroom = strVal(row["Classroom"]);
-        const rateCardKey = [center ?? "", rateSheet ?? "", dropOff ?? "", pickup ?? "", program ?? "", classroom ?? ""].join("|");
+        const rateCardKey = [center ?? "", rateSheet ?? "", to24h(dropOff), to24h(pickup), program ?? "", classroom ?? ""].join("|");
 
         dbRows.push({
           batchId:         batchId ?? "__pending__",

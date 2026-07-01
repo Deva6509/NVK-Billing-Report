@@ -30,6 +30,18 @@ function str(v: any): string | null {
   return s === "" || s === "N/A" ? null : s;
 }
 
+// Convert "6:30 AM" / "3:00 PM" → "06:30:00" / "15:00:00" for key matching
+function to24h(t: string | null): string {
+  if (!t) return "";
+  const m = t.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)$/i);
+  if (!m) return t.trim();
+  let h = parseInt(m[1], 10);
+  const min = m[2], sec = m[3] ?? "00", ampm = m[4].toUpperCase();
+  if (ampm === "AM") { if (h === 12) h = 0; }
+  else               { if (h !== 12) h += 12; }
+  return `${String(h).padStart(2, "0")}:${min}:${sec}`;
+}
+
 // POST /api/rate-sheet/upload
 // Body: { files: [{ name, rows[] }] }
 // Always replaces all existing Rate Sheet data.
@@ -88,8 +100,8 @@ export async function POST(req: NextRequest) {
           const rateCardKey = [
             centerShort,
             fixed.versionName ?? "",
-            fixed.dropOff     ?? "",
-            fixed.pickUp      ?? "",
+            to24h(fixed.dropOff),
+            to24h(fixed.pickUp),
             fixed.program     ?? "",
             itemName,
           ].join("|");

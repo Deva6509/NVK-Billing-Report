@@ -6,6 +6,17 @@ export const maxDuration = 300;
 const db = prisma as any;
 const enc = new TextEncoder();
 
+function to24h(t: string | null): string {
+  if (!t) return "";
+  const m = t.trim().match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?\s*(AM|PM)$/i);
+  if (!m) return t.trim();
+  let h = parseInt(m[1], 10);
+  const min = m[2], sec = m[3] ?? "00", ampm = m[4].toUpperCase();
+  if (ampm === "AM") { if (h === 12) h = 0; }
+  else               { if (h !== 12) h += 12; }
+  return `${String(h).padStart(2, "0")}:${min}:${sec}`;
+}
+
 function sse(data: object) {
   return enc.encode(`data: ${JSON.stringify(data)}\n\n`);
 }
@@ -41,8 +52,8 @@ export async function POST(_req: NextRequest) {
           const key = [
             centerShort,
             r.versionName ?? "",
-            r.dropOff    ?? "",
-            r.pickUp     ?? "",
+            to24h(r.dropOff),
+            to24h(r.pickUp),
             r.program    ?? "",
             r.itemName   ?? "",
           ].join("|");
