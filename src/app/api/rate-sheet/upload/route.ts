@@ -79,11 +79,21 @@ export async function POST(req: NextRequest) {
         };
 
         // Unpivot all non-fixed columns
+        const centerShort = (fixed.center ?? "").split(",")[0].trim();
         for (const [k, v] of Object.entries(row)) {
           if (FIXED_KEYS.has(k.trim().toLowerCase())) continue;
-          const val = str(v);
+          const val      = str(v);
           if (val === null) continue; // skip empty pivot values
-          dbRows.push({ ...fixed, itemName: k.trim(), itemValue: val });
+          const itemName = k.trim();
+          const rateCardKey = [
+            centerShort,
+            fixed.versionName ?? "",
+            fixed.dropOff     ?? "",
+            fixed.pickUp      ?? "",
+            fixed.program     ?? "",
+            itemName,
+          ].join("|");
+          dbRows.push({ ...fixed, itemName, itemValue: val, rateCardKey });
         }
       }
     }

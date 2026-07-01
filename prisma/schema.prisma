@@ -841,11 +841,13 @@ model RateSheetRow {
   program     String?
   itemName    String?
   itemValue   String?
+  rateCardKey String?        // Center(before comma)|VersionName|DropOff|PickUp|Program|ItemName
   createdAt   DateTime       @default(now())
 
   @@index([batchId])
   @@index([center])
   @@index([itemName])
+  @@index([rateCardKey])
 }
 
 // ─── FC28 History Records (legacy — kept for old data) ───────────────────────
