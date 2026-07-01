@@ -97,24 +97,33 @@ export async function POST(_req: NextRequest) {
           for (const rateCardKey of chunk) {
             // Try direct match first; if not found, try with classroom substitution
             let match = rateMap.get(rateCardKey);
+            let mappedKey = rateCardKey; // track which key actually matched
+
             if (!match && classroomMap.size > 0) {
               // FC28 key format: Center|RateSheet|DropOff|Pickup|Program|Classroom
               const parts = rateCardKey.split("|");
               if (parts.length === 6) {
-                const fc28Classroom = parts[5];
+                const fc28Classroom   = parts[5];
                 const mappedClassroom = classroomMap.get(fc28Classroom);
                 if (mappedClassroom) {
-                  const mappedKey = [...parts.slice(0, 5), mappedClassroom].join("|");
+                  mappedKey = [...parts.slice(0, 5), mappedClassroom].join("|");
                   match = rateMap.get(mappedKey);
                 }
               }
             }
             if (!match) { unmapped++; continue; }
 
-            const patch = {
+            const patch: Record<string, string> = {
               "Item Name (Rate Sheet)":  match.itemName,
               "Item Value (Rate Sheet)": match.itemValue,
             };
+
+            // If classroom mapping was applied, update the stored Rate Card Key so
+            // the corrected key (with mapped classroom) is visible in the data and
+            // future lookups match directly without re-applying the mapping.
+            if (mappedKey !== rateCardKey) {
+              patch["Rate Card Key (FC28)"] = mappedKey;
+            }
 
             valueParts.push(`($${pi}::text, $${pi + 1}::jsonb)`);
             params.push(rateCardKey, JSON.stringify(patch));
