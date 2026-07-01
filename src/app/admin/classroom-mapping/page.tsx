@@ -219,7 +219,7 @@ export default function ClassroomMappingPage() {
         </div>
 
         {/* Mapping table */}
-        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-hidden">
+        <div className="bg-white rounded-2xl border border-slate-200 shadow-sm overflow-visible">
           {loading ? (
             <div className="p-12 text-center text-slate-400 text-sm">Loading…</div>
           ) : mappings.length === 0 ? (
