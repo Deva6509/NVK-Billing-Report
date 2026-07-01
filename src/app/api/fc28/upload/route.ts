@@ -35,7 +35,7 @@ export async function POST(req: NextRequest) {
     let { batchId } = body;
 
     if (!reportDate) return NextResponse.json({ error: "reportDate required" }, { status: 400 });
-    if (!files?.length) return NextResponse.json({ error: "No files provided" }, { status: 400 });
+    if (!isFinal && !files?.length) return NextResponse.json({ error: "No files provided" }, { status: 400 });
 
     // Build rows for all files in this chunk
     const dbRows: any[] = [];
