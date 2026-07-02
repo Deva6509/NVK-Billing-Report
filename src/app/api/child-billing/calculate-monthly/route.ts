@@ -137,11 +137,8 @@ export async function POST(req: NextRequest) {
             const latePMFees  = (latePM==="Yes"||latePM==="yes")   && latePMKey  ? (latePMMap.get(latePMKey)??"")  : "";
 
             // Final Days / Weeks
-            const origStart    = parseDate(startStr);
-            const fedDay       = fed  ? new Date(fed);  null; if (fed) { const t=new Date(fed); t.setHours(0,0,0,0); }
-            const fsdDay       = fsd  ? new Date(fsd);  null;
-            const osd          = origStart ? new Date(origStart) : null;
-            if (osd) osd.setHours(0,0,0,0);
+            const origStart = parseDate(startStr);
+            const osd = origStart ? (() => { const t=new Date(origStart); t.setHours(0,0,0,0); return t; })() : null;
             const fedD = fed ? (() => { const t=new Date(fed); t.setHours(0,0,0,0); return t; })() : null;
             const fsdD = fsd ? (() => { const t=new Date(fsd); t.setHours(0,0,0,0); return t; })() : null;
 
